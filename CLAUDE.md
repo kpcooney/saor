@@ -44,6 +44,41 @@ docs/               Architecture docs, ADRs, project documentation
 
 **README convention**: Every top-level directory and significant subdirectory should have a `README.md` explaining what lives there, how it fits into the system, and any conventions specific to that directory. These READMEs are the first thing a new reader (human or agent) encounters when navigating the project. Keep them concise — a paragraph or two of orientation, not a full design document.
 
+## Allowed Tools
+
+These commands can be run without asking for approval. The PR workflow is the quality gate — local work should flow without prompt-by-prompt permission.
+
+**Note on security model**: These permissions are behavioral guidelines that Claude Code follows as instructions. They are not a runtime sandbox. The actual security boundaries are: GitHub branch protection on `main`, and Kevin reviewing every PR before merge. These permissions reduce friction for local development work — the PR review gate prevents bad code from reaching `main`.
+
+**Git (non-destructive, feature branches only):**
+- `git add`, `git commit`
+- `git push`, `git push -u origin` — **only to feature branches**, never directly to `main`
+- `git branch`, `git checkout`, `git switch`
+- `git status`, `git log`, `git diff`, `git fetch`, `git pull`
+- `git stash`, `git stash pop`
+
+**Build and test:**
+- `npm install`, `npm ci` (in `agents/` or root) — note: this executes postinstall scripts from dependencies; mitigated by package.json changes going through PR review
+- `npm test`, `npm run build`, `npm run dev` (in `agents/` or root)
+- `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt` (in `src-tauri/`)
+- `npx vitest` — only `vitest`; do not run arbitrary packages via `npx`
+
+**File operations:**
+- Read, write, edit, create, delete files within the project directory
+- Create directories
+- **Exception**: Do not modify `CLAUDE.md` without explicit approval — it defines the project's operating rules and permission boundaries
+
+**Do NOT run without explicit approval:**
+- `git push --force`, `git push --force-with-lease` — destructive, can lose review history
+- `git reset --hard` — discards uncommitted work
+- `git push` directly to `main` — Kevin merges via GitHub PR
+- `git merge` into `main`
+- Modifying `CLAUDE.md`
+- Any command that deploys, publishes, or releases
+- `rm -rf` or bulk deletions outside of normal file editing
+- Running arbitrary packages via `npx` (only whitelisted tools above)
+- Any shell command that installs system-level packages or modifies system configuration
+
 ## Conventions
 
 ### Commits
@@ -71,15 +106,24 @@ Examples: `12/sqlite-memory-store`, `15/jsonl-audit-writer`, `18/code-agent-iden
 3. **Implement on the branch.** Commit early and often using Conventional Commits. Each commit should be a coherent unit — not a single massive commit at the end.
 4. **Write tests** alongside the implementation (see Testing section below).
 5. **Open a pull request on GitHub** when the work is ready for review. The PR description must follow the PR format standard (`standards/documentation-standards/pr-format.md`): summary, changes made, testing performed, traceability references (Issue, Epic if applicable, related ADRs), and any open questions.
-6. **Wait for review.** The reviewer (Kevin) will leave comments on GitHub.
-7. **Address review comments** by pushing additional commits to the same branch. Do not force-push or squash during review — the commit history should show what changed in response to feedback.
-8. **Kevin merges.** Do not merge your own PRs. Kevin will approve and merge when satisfied.
+6. **Review loop.** Kevin will review the PR on GitHub. This is a conversation, not a rubber stamp. The loop works like this:
+
+   a. **Kevin leaves review comments** — questions, critiques, change requests, or approvals on specific lines or the PR as a whole.
+
+   b. **You respond to each comment.** You have three options:
+      - **Justify**: If you believe the current approach is correct, reply on the comment thread explaining your reasoning. Be specific — reference architecture decisions, tradeoffs, or constraints that informed the choice. Kevin may accept the justification or push back further.
+      - **Adjust**: If the feedback is valid, make the change. Push a new commit to the branch (do not force-push or squash — the commit history should show what changed in response to which feedback). Reply on the comment thread noting what you changed and in which commit.
+      - **Clarify**: If the comment is ambiguous or you need more context to act on it, ask a clarifying question on the thread.
+
+   c. **Kevin re-reviews.** After you've responded to all comments, Kevin looks again. This may produce another round of comments. The loop continues until Kevin is satisfied.
+
+   d. **Kevin approves and merges.** Do not merge your own PRs. Do not resolve Kevin's review comments — let Kevin resolve them after reviewing your response. Only Kevin marks conversations as resolved.
 
 **What you can do without asking:**
 - Create feature branches and push commits
 - Create GitHub issues for tasks within the current phase scope
 - Open pull requests
-- Respond to review comments with code changes
+- Respond to review comments with code changes or justifications
 - Create ADRs for design decisions (these still go through PR review)
 
 **What requires discussion first:**
