@@ -8,7 +8,7 @@ Phase 1 of Saor uses a JSONL-based audit store (`FileSystemAuditStore`) as the i
 
 This decision affects:
 
-- **Queryability**: How easy it is to find events by time range, by session, or by agent using standard Unix tools (`grep`, `jq`, `cat`).
+- **Queryability**: How easy it is to find events by time range, by session, or by agent using standard Unix tools (`grep`, `jq` (a command-line JSON processor), `cat`).
 - **File count at scale**: How many files accumulate in the audit directory over weeks and months of active development.
 - **UI consumption**: How the audit viewer component loads and displays events.
 - **Single-session replay**: How practical it is to isolate and replay the events from one agent session.
