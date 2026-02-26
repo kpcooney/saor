@@ -63,7 +63,7 @@ src-tauri/      Rust backend — storage, process management, IPC
 src/            Svelte + TypeScript frontend
 agents/         TypeScript agent layer — definitions, hooks, MCP servers
 standards/      System default standards files (three-tier base layer)
-docs/           Architecture docs, ADRs, handoff summaries
+docs/           Architecture docs, ADRs, verification reports
 ```
 
 Each directory has its own README with more detail. The authoritative architecture reference is `docs/architecture/sdlc-agent-architecture-research-v4.md`.

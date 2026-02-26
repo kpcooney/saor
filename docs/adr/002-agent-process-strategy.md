@@ -18,30 +18,26 @@ This decision was surfaced during Issue #3 (Tauri sidecar verification, PR #17) 
 
 - **Option B: Compiled sidecar binary** — The agent TypeScript package is compiled into a self-contained executable (e.g., via `@yao-pkg/pkg`) and registered as a Tauri `externalBin` sidecar. Launched via `app.shell().sidecar("saor-agents")`. Requires platform-specific binaries with target-triple suffixes (`saor-agents-x86_64-apple-darwin`, etc.).
 
-- **Option C: Hybrid** — Use Option A (managed subprocess) during development and Phase 1, with Option B (compiled sidecar) as the distribution path for later phases when the app ships to users who may not have Node.js installed.
-
-**Chosen approach**: Option C (hybrid) — managed subprocess for Phase 1, compiled sidecar as upgrade path. Both approaches use the same `tauri-plugin-shell` API for process lifecycle management (spawn, stdio, kill). The difference is only binary resolution. This avoids premature build complexity while keeping the distribution path open.
+**Chosen approach**: Option A (managed subprocess) — Node.js is already a deployment prerequisite (the Claude Agent SDK requires it), so requiring it on the host PATH adds no new dependency. This avoids the build complexity of compiling platform-specific binaries. Both options use the same `tauri-plugin-shell` API for process lifecycle management (spawn, stdio, kill), so this decision can be revisited later if distribution to environments without Node.js becomes a goal.
 
 ## Consequences
 
 **Positive:**
 
-- **No binary compilation step in Phase 1.** The development loop is `npm run build` → Tauri spawns `node dist/index.js`. No `pkg` compilation, no target-triple management, no platform-specific binary matrix.
+- **No binary compilation step.** The development loop is `npm run build` → Tauri spawns `node dist/index.js`. No `pkg` compilation, no target-triple management, no platform-specific binary matrix.
 - **Faster iteration.** Changes to the agent layer are picked up immediately after a TypeScript build. No need to recompile a standalone binary.
-- **Same API surface.** Both `app.shell().command("node")` and `app.shell().sidecar("name")` return `(Receiver<CommandEvent>, CommandChild)` with identical event types (`Stdout`, `Stderr`, `Terminated`). The `AgentProcessManager` abstraction does not need to change when upgrading.
-- **Node.js is a reasonable Phase 1 prerequisite.** The developers working on Saor during Phase 1 already have Node.js installed. This is a developer tool, not an end-user product yet.
+- **No new dependency.** Node.js is already required by the Claude Agent SDK and the TypeScript build toolchain. Requiring it at runtime adds no new prerequisite.
 
 **Negative / trade-offs:**
 
-- **Runtime dependency on Node.js.** The host machine must have a compatible Node.js version (v20+) on its PATH. This is acceptable for development but not for end-user distribution.
-- **No self-contained binary.** The app cannot be distributed as a single package without also requiring Node.js installation. This limits Phase 1 to developer use, which is the intended audience.
+- **Runtime dependency on Node.js.** The host machine must have a compatible Node.js version (v20+) on its PATH. If the app is ever distributed to environments without Node.js, this decision would need to be revisited.
 - **Version compatibility risk.** The user's installed Node.js version could differ from what the agent layer expects. Mitigated by documenting the minimum version and checking at spawn time.
 
 **Neutral / notable:**
 
-- **Capability configuration is the same.** The `shell:allow-spawn` permission in `capabilities/default.json` must list `node` as an allowed command. For a compiled sidecar, it would list the binary name instead. The security model is unchanged.
-- **`CommandChild::kill()` takes ownership** in both patterns. The `AgentProcessManager` must account for this regardless of spawn method (break out of event loop before calling `kill()`).
-- **Upgrade path is mechanical.** When ready for distribution: (1) add `pkg` or similar to the agent build pipeline, (2) register the output binary in `tauri.conf.json` under `bundle.externalBin`, (3) change `app.shell().command("node")` to `app.shell().sidecar("saor-agents")`, (4) update capability permissions. No architectural changes needed.
+- **Capability configuration.** The `shell:allow-spawn` permission in `capabilities/default.json` must list `node` as an allowed command.
+- **`CommandChild::kill()` takes ownership.** The `AgentProcessManager` must break out of the event loop before calling `kill()`, since the method consumes `self`.
+- **Reversibility.** Both options use the same `tauri-plugin-shell` API (`spawn`, `stdio`, `kill`). Switching to a compiled sidecar later would require: (1) adding a compilation step (`@yao-pkg/pkg` or similar), (2) registering the binary in `tauri.conf.json` under `bundle.externalBin`, (3) changing `command("node")` to `sidecar("saor-agents")`. No architectural changes needed.
 
 ## References
 
