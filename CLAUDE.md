@@ -222,6 +222,47 @@ This project has a challenge: much of the interesting behavior involves the Clau
 - **`createSdkMcpServer` verification**: Confirm the in-process MCP pattern works with current SDK version before building on it. If the API has changed, document the delta and adapt.
 - **Tauri sidecar setup**: Verify the Claude CLI sidecar bundling works cleanly on the target platform before building the agent process manager around it.
 
+## Session Management
+
+### Status Reports
+
+After completing each issue (or when context is running low), post a brief status report as a message to Kevin. Format:
+
+```
+**Status Report — Issue #NN**
+- Completed: (what was done)
+- Artifacts: (files created/modified, PRs opened)
+- Next: (what should happen next)
+- Context: (estimated context usage — low/medium/high — and whether to continue or hand off)
+```
+
+### Handoff Summaries
+
+When a session ends (context exhaustion, natural stopping point, or explicit request), write a handoff summary to `docs/handoff/session-NNN.md` (zero-padded three digits). This file gives the next session everything it needs to pick up the work without re-reading the entire codebase.
+
+Handoff format:
+
+```markdown
+# Session NNN — Handoff Summary
+
+**Date**: YYYY-MM-DD
+**Issues worked**: #NN, #NN
+
+## What was done
+(Concise list of completed work, with PR/commit references)
+
+## What's in progress
+(Anything started but not finished — branch names, open PRs, known issues)
+
+## What's next
+(Prioritized list of next tasks, with issue numbers)
+
+## Key context for the next session
+(Anything the next session needs to know that isn't in CLAUDE.md or the architecture doc — gotchas, decisions made during the session, things that didn't work)
+```
+
+The next session should read the most recent handoff file and CLAUDE.md before starting work.
+
 ## What Not To Do
 
 - Do not implement summary-based handoffs. The reference manifest pattern is the architecture.
