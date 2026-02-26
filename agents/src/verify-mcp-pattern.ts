@@ -22,6 +22,7 @@
 // Issue: https://github.com/kpcooney/saor/issues/2
 
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+// z is Zod's conventional import alias — see https://zod.dev/v4/getting-started
 import { z } from "zod/v4";
 import type {
   McpSdkServerConfigWithInstance,
