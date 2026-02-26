@@ -13,3 +13,22 @@ This is the Rust backend, following Tauri's standard convention where the native
 **What it is NOT responsible for:** Agent business logic, agent orchestration, and MCP server definitions. Those live in the `agents/` TypeScript package. The Rust layer is deliberately thin — stable infrastructure that doesn't change often, so that iteration happens in the agent layer where the interesting work is.
 
 **IPC** stands for inter-process communication. The Svelte frontend calls `invoke("command_name", args)`, which crosses the WebView-to-Rust process boundary via Tauri's IPC bridge and returns a serialized result. Every Tauri command is registered in `lib.rs` via `invoke_handler`.
+
+## Build & Test
+
+All commands run from this directory (`src-tauri/`).
+
+```bash
+cargo build           # compile
+cargo test            # run tests
+cargo clippy          # lint (warnings treated as errors in CI)
+cargo fmt --check     # check formatting
+```
+
+To run the full Tauri app (frontend + backend together), use `npm run tauri dev` from the project root.
+
+## Configuration
+
+- **`tauri.conf.json`** — Tauri app config: window settings, build commands, bundle targets
+- **`capabilities/default.json`** — Tauri 2.0 capability permissions (shell spawn, file access, etc.)
+- **`Cargo.toml`** — Rust dependencies. Key crates: `tauri`, `tauri-plugin-shell`, `serde`, `serde_json`

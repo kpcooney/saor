@@ -10,4 +10,23 @@ This package contains:
 - **`src/hooks/`** — Lifecycle hooks: scope enforcement (PreToolUse, blocks out-of-scope actions) and audit logging (PostToolUse, records every action)
 - **`src/mcp/`** — In-process MCP server definitions: memory access tools and the reference resolver (dereferences `file://`, `standards://`, `memory://`, `audit://` URIs)
 
-To install dependencies: `cd agents && npm install`. The package depends on `@anthropic-ai/claude-agent-sdk` for the agent harness and `zod` for schema validation. Tests run with `vitest`.
+## Build & Test
+
+All commands run from this directory (`agents/`).
+
+```bash
+npm install           # install dependencies
+npm run build         # compile TypeScript (tsc)
+npm test              # run tests (vitest)
+npm run test:watch    # run tests in watch mode
+```
+
+## Dependencies
+
+- **`@anthropic-ai/claude-agent-sdk`** — agent harness (spawns Claude CLI, provides hooks, MCP, subagents)
+- **`zod`** v4 — schema validation. **Important**: import as `import { z } from "zod/v4"` (not `"zod"`). The SDK requires Zod v4. See `docs/verification/002-mcp-pattern-verification.md` for details.
+
+## Key Notes
+
+- In-process MCP tools use `const myTool = tool(...)` — do not annotate with an explicit `SdkMcpToolDefinition` type (the generic resolves to `never`).
+- SDK version verified against: `@anthropic-ai/claude-agent-sdk@0.2.58`
