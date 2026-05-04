@@ -131,6 +131,20 @@ Examples: `12/sqlite-memory-store`, `15/jsonl-audit-writer`, `18/code-agent-iden
 - Scope changes (adding or removing Phase 1 deliverables)
 - Introducing new dependencies not implied by the architecture
 
+### Review Assistance Protocol
+
+To accelerate PR review without compromising the merge gate, the project uses a Claude-Code-orchestrated three-reviewer + coordinator pattern, defined in [ADR-004](docs/adr/004-review-assistance-protocol.md). The reviewer agents are **advisory** — Kevin remains the merge gate, and the agents never recommend "approve" or "block".
+
+**When to invoke**: Kevin runs `/review-branch` (or `/review-branch <branch-name>`) during a Claude Code session when he is about to review a PR or has just pushed new commits to a feature branch. The command is defined at `.claude/commands/review-branch.md`.
+
+**What it does**: spawns three blind reviewer subagents in parallel — Design & Code Quality, Security & Edge Cases, Testability & Behavior — each with the prompt from `standards/review-assistance/`. After all three return, a coordinator subagent synthesises the reports into convergence (concerns flagged by 2+ reviewers, listed first), single-reviewer concerns, explicit disagreements, and a "suspicious unanimity" flag if the diff exceeds 200 lines and all three reviewers reported zero concerns.
+
+**What the output is**: the coordinator's structured synthesis, with the three raw reviewer reports appended for spot-checking. Kevin reads the synthesis alongside the diff and decides what to merge. The agents do not gate merge in any automated way — there is no CI workflow, no required status check, no branch protection change.
+
+**Where prompts live**: `standards/review-assistance/`. Updates to reviewer behaviour go through the normal PR workflow — a prompt change is a behaviour change and warrants the same review attention as a code change.
+
+**Migration path**: when the agent harness lands (issues #7 and #11), the reviewer prompts are read directly by the harness via the `standards://review-assistance/<role>` URI scheme without modification. Only the spawning mechanism changes.
+
 ### Architectural Decisions
 If you encounter a design question not covered by the architecture document, **do not just pick an answer and keep going**. If in doubt about the right direction, prompt for feedback — it's better to ask than to build on the wrong assumption. If the decision is significant enough to affect future work, write an ADR in `docs/adr/` using the MADR template from `standards/documentation-standards/adr-format.md`. ADRs go through the same PR workflow — branch, write, open PR for review.
 
