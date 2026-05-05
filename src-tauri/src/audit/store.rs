@@ -50,9 +50,16 @@ impl FileSystemAuditStore {
     /// Appends a single audit event as a JSON line to today's file.
     ///
     /// The file is created if it doesn't exist. Each event is a single
-    /// line — no multi-line records. The file is opened in append mode
-    /// so concurrent calls within the same process are safe (though
-    /// Phase 1 runs a single agent at a time).
+    /// line — no multi-line records.
+    ///
+    /// Concurrency: Phase 1 runs a single agent at a time, so this
+    /// method does not implement explicit serialization. POSIX `O_APPEND`
+    /// makes a single `write()` call atomic only up to `PIPE_BUF`
+    /// (~4 KiB on most systems), and `writeln!` may issue multiple
+    /// writes for a large event — so concurrent multi-process callers
+    /// could interleave a single event's bytes. Adding a `Mutex<File>`
+    /// or a single `write_all` of a pre-built buffer is deferred until
+    /// concurrent agents become a real Phase 2 requirement.
     pub fn log(&self, event: &AuditEvent) -> Result<(), AuditError> {
         let filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
         let file_path = self.audit_dir.join(filename);
@@ -98,6 +105,21 @@ impl FileSystemAuditStore {
             .collect())
     }
 
+    /// Returns all events tied to a specific issue reference (e.g.,
+    /// `"PROJ-167"`), across all audit files. Events with no
+    /// `issue_ref` are excluded — the filter is exact-match against
+    /// `Some(issue_ref)`.
+    ///
+    /// Architecture Section 8.3 lists `getByIssue` as part of the
+    /// `AuditStore` interface; this method implements it.
+    pub fn get_by_issue(&self, issue_ref: &str) -> Result<Vec<AuditEvent>, AuditError> {
+        let events = self.read_all_events()?;
+        Ok(events
+            .into_iter()
+            .filter(|e| e.issue_ref.as_deref() == Some(issue_ref))
+            .collect())
+    }
+
     /// Reads all JSONL files in the audit directory, sorted by filename
     /// (which sorts chronologically due to YYYY-MM-DD naming), and
     /// deserializes every line into an AuditEvent.
@@ -116,13 +138,31 @@ impl FileSystemAuditStore {
             let file = fs::File::open(&file_path)?;
             let reader = BufReader::new(file);
 
-            for line in reader.lines() {
+            for (line_number, line) in reader.lines().enumerate() {
                 let line = line?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                let event: AuditEvent = serde_json::from_str(&line)?;
-                events.push(event);
+                // Log-and-skip malformed lines rather than aborting the
+                // entire query. Audit data is forensic — failing closed
+                // on a single corrupt line (partial write at crash,
+                // disk corruption, manual edit, mixed-version schema)
+                // would hide every prior event from queries. JSONL is
+                // designed to tolerate per-line failures. eprintln! is
+                // a placeholder until structured logging lands.
+                match serde_json::from_str::<AuditEvent>(&line) {
+                    Ok(event) => events.push(event),
+                    Err(err) => {
+                        eprintln!(
+                            "audit: skipping malformed line {} in {}: {}",
+                            // line_number is 0-indexed; user-facing
+                            // convention is 1-indexed.
+                            line_number + 1,
+                            file_path.display(),
+                            err
+                        );
+                    }
+                }
             }
         }
 
@@ -320,6 +360,129 @@ mod tests {
         assert_eq!(violations.len(), 2);
         assert_eq!(violations[0].id, "evt-1");
         assert_eq!(violations[1].id, "evt-3");
+    }
+
+    #[test]
+    fn test_get_by_issue_filters_to_matching_issue_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        let mut event_a = test_event(
+            "evt-a",
+            "session-1",
+            "agent-1",
+            AuditEventType::FileWrite,
+        );
+        event_a.issue_ref = Some("PROJ-167".to_string());
+
+        let mut event_b = test_event(
+            "evt-b",
+            "session-1",
+            "agent-1",
+            AuditEventType::FileWrite,
+        );
+        event_b.issue_ref = Some("PROJ-200".to_string());
+
+        let mut event_c = test_event(
+            "evt-c",
+            "session-1",
+            "agent-1",
+            AuditEventType::FileWrite,
+        );
+        event_c.issue_ref = Some("PROJ-167".to_string());
+
+        store.log(&event_a).unwrap();
+        store.log(&event_b).unwrap();
+        store.log(&event_c).unwrap();
+
+        let proj_167 = store.get_by_issue("PROJ-167").unwrap();
+        assert_eq!(proj_167.len(), 2);
+        assert_eq!(proj_167[0].id, "evt-a");
+        assert_eq!(proj_167[1].id, "evt-c");
+
+        let proj_200 = store.get_by_issue("PROJ-200").unwrap();
+        assert_eq!(proj_200.len(), 1);
+        assert_eq!(proj_200[0].id, "evt-b");
+    }
+
+    #[test]
+    fn test_get_by_issue_excludes_events_with_no_issue_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        // test_event sets issue_ref to None by default.
+        store
+            .log(&test_event(
+                "evt-no-issue",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+
+        let mut event_with_issue = test_event(
+            "evt-with-issue",
+            "session-1",
+            "agent-1",
+            AuditEventType::FileWrite,
+        );
+        event_with_issue.issue_ref = Some("PROJ-167".to_string());
+        store.log(&event_with_issue).unwrap();
+
+        let results = store.get_by_issue("PROJ-167").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "evt-with-issue");
+
+        // An empty issue_ref string should not match the None event.
+        let empty = store.get_by_issue("").unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_read_all_events_skips_malformed_jsonl_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        // Write one valid event so the file exists.
+        store
+            .log(&test_event(
+                "evt-valid-1",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+
+        // Append a malformed line and another valid event directly to
+        // today's file. The malformed line is bracketed by valid events
+        // so we can verify the iteration recovers.
+        let today_filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
+        let today_path = tmp.path().join(".sdlc").join("audit").join(today_filename);
+
+        let mut event_after = test_event(
+            "evt-valid-2",
+            "session-1",
+            "agent-1",
+            AuditEventType::FileWrite,
+        );
+        event_after.id = "evt-valid-2".to_string();
+        let valid_after_json = serde_json::to_string(&event_after).unwrap();
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&today_path)
+            .unwrap();
+        writeln!(file, "{{this is not valid json").unwrap();
+        writeln!(file, "{valid_after_json}").unwrap();
+        drop(file);
+
+        // The query must succeed, returning the two valid events and
+        // skipping the malformed line. A pre-fix version of the store
+        // would propagate the serde error and return Err.
+        let events = store.get_by_session("session-1").unwrap();
+        assert_eq!(events.len(), 2, "expected two valid events, malformed line skipped");
+        assert_eq!(events[0].id, "evt-valid-1");
+        assert_eq!(events[1].id, "evt-valid-2");
     }
 
     #[test]
