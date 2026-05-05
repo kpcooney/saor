@@ -2,10 +2,10 @@
 
 Reviewer and coordinator prompts for the **review assistance protocol** described in [ADR-004](../../docs/adr/004-review-assistance-protocol.md), plus the **targeted re-review pattern** described in [ADR-005](../../docs/adr/005-targeted-re-review-pattern.md).
 
-The protocol is invoked by Kevin during a Claude Code session. Two slash commands:
+The protocol is invoked by Kevin during a Claude Code session through a single slash command, `/review-branch`, with two modes:
 
-- `/review-branch [branch-or-PR]` — initial review. Three reviewer agents run blind in parallel, then a coordinator synthesises their reports into convergence and divergence themes.
-- `/re-review-branch [branch-or-PR]` — post-fix re-review. Reads the most recent prior `/review-branch` run, computes the diff of the fix, asks each reviewer to evaluate (per concern) whether the fix addressed it.
+- `/review-branch [branch-or-PR]` — **initial review**. Three reviewer agents run blind in parallel, then a coordinator synthesises their reports into convergence and divergence themes.
+- `/review-branch --review-fixes [branch-or-PR]` — **post-fix re-review**. Reads the most recent prior initial-review run, computes the diff of the fix, asks each reviewer to evaluate (per concern) whether the fix addressed it.
 
 The agents are **advisory** in both modes — Kevin remains the merge gate. They never recommend approve or block.
 
@@ -44,7 +44,7 @@ The re-review coordinator surfaces resolution-status counts per reviewer, outsta
 
 ## State on disk
 
-The slash commands write each run's reports + coordinator synthesis + `meta.json` to `.claude/review-state/<branch-name>/<timestamp>/`. The directory is gitignored — this state is per-developer and regenerable. `/re-review-branch` reads the most recent run's state to identify the prior commit and load the prior reviewer reports.
+Each run writes its reports + coordinator synthesis + `meta.json` to `.claude/review-state/<branch-name>/<timestamp>/`. The directory is gitignored — this state is per-developer and regenerable. The re-review mode (`--review-fixes`) reads the most recent run's state to identify the prior commit and load the prior reviewer reports. After every new run the slash command prunes the per-branch directory to the **5 most recent timestamps**; older runs are deleted automatically.
 
 ## Updating prompts
 
