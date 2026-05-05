@@ -1,5 +1,5 @@
 ---
-description: Run the review assistance protocol on the current branch (or one named in $ARGUMENTS) — three blind reviewers + a coordinator synthesise findings.
+description: Run the review assistance protocol on a branch or PR — three blind reviewers + a coordinator synthesise findings. Pass a branch name or a PR number, or omit to use the current branch.
 ---
 
 # /review-branch
@@ -12,8 +12,13 @@ Help Kevin review a branch faster by surfacing concerns from three blind reviewe
 
 ## Inputs
 
-- `$ARGUMENTS` — optional branch name. If empty, use the current branch.
-- The base branch is `main` (or `origin/main` if local `main` is stale).
+`$ARGUMENTS` is one of:
+
+- **Empty** — use the current branch (`git rev-parse --abbrev-ref HEAD`).
+- **A branch name** (anything non-numeric) — use it directly.
+- **A PR number** (purely digits, e.g. `23`) — resolve to its head branch via `gh pr view <num> --json headRefName,body,number,title`. The PR description is captured as a side-effect of the resolution and reused in step 1's PR-description step.
+
+The base branch is `main` (or `origin/main` if local `main` is stale).
 
 ## Steps
 
@@ -21,12 +26,18 @@ Follow these in order.
 
 ### 1. Gather context
 
-Determine the target branch (`$ARGUMENTS` if non-empty, otherwise the current branch via `git rev-parse --abbrev-ref HEAD`). Then collect, **writing each artefact to a temp file** so it can be passed to subagents by path rather than inlined into Task prompts (inlining 1000+ lines into a Task prompt risks hitting input size limits):
+Resolve `$ARGUMENTS` to a branch name per the Inputs table:
+
+- If `$ARGUMENTS` is empty, the branch is `git rev-parse --abbrev-ref HEAD`.
+- If `$ARGUMENTS` matches `^[0-9]+$`, treat it as a PR number: run `gh pr view <num> --json headRefName,body,number,title > /tmp/saor-review-pr.json` and read `headRefName` from that JSON to get the branch. Fetch first if needed (`git fetch origin pull/<num>/head`).
+- Otherwise, treat `$ARGUMENTS` as a branch name directly.
+
+Then collect, **writing each artefact to a temp file** so it can be passed to subagents by path rather than inlined into Task prompts (inlining 1000+ lines into a Task prompt risks hitting input size limits):
 
 - **Diff vs main**: `git diff origin/main...<branch> > /tmp/saor-review-diff.txt` (use the three-dot form to compute the diff from the merge-base, not the tip).
 - **Changed files list**: `git diff --name-only origin/main...<branch> > /tmp/saor-review-files.txt`.
 - **Branch metadata**: `git log --format='%h %s%n%n%b' origin/main..<branch> > /tmp/saor-review-commits.txt` for the commits being reviewed.
-- **PR description, if any**: `gh pr view <branch> --json title,body,number > /tmp/saor-review-pr.json 2>/dev/null` — non-zero exit is fine, it just means no PR is open yet.
+- **PR description**: if `$ARGUMENTS` was a PR number, `/tmp/saor-review-pr.json` was already written above. Otherwise, try `gh pr view <branch> --json title,body,number > /tmp/saor-review-pr.json 2>/dev/null` — non-zero exit is fine, it just means no PR is open for this branch yet.
 
 If the diff file is empty (the branch matches `main`), stop and tell Kevin there is nothing to review.
 
