@@ -29,6 +29,26 @@ pub enum AuditError {
     DirectoryCreation(String),
 }
 
+/// Record of a JSONL line that could not be deserialised into an
+/// AuditEvent — partial write at crash, manual edit, mixed-version
+/// schema. The audit store's read path log-and-skips these so a single
+/// bad line doesn't abort the whole query, but the records are
+/// returned alongside the events so callers (audit viewer UI, hook
+/// layer, tests) can surface or count corruption deliberately.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MalformedLine {
+    /// Path to the JSONL file containing the malformed line.
+    pub file: std::path::PathBuf,
+
+    /// 1-indexed line number within the file (user-facing convention).
+    pub line_number: usize,
+
+    /// `serde_json::Error::Display` for diagnostics. The raw line
+    /// content is intentionally not captured here — a tampered file
+    /// could otherwise leak content via this string.
+    pub error: String,
+}
+
 /// Exhaustive set of audit event types. Each variant maps to a dot-notation
 /// string (e.g., `AgentCreated` serializes to `"agent.created"`) for
 /// consistency with the TypeScript interface.

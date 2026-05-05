@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::schema::{AuditError, AuditEvent, AuditEventType};
+use super::schema::{AuditError, AuditEvent, AuditEventType, MalformedLine};
 
 /// Append-only JSONL audit store. Writes events to per-day files under
 /// `{project_path}/.sdlc/audit/` following the granularity strategy
@@ -31,7 +31,9 @@ use super::schema::{AuditError, AuditEvent, AuditEventType};
 ///
 /// Each call to `log()` appends a single JSON line to today's file.
 /// Query methods read all files and filter in memory — acceptable for
-/// Phase 1 scale.
+/// Phase 1 scale (expect tens of MB of audit history before the
+/// SqliteAuditStore migration becomes warranted; see Phase 4 in
+/// architecture Section 8.4).
 pub struct FileSystemAuditStore {
     audit_dir: PathBuf,
 }
@@ -77,7 +79,7 @@ impl FileSystemAuditStore {
 
     /// Returns all events from a specific session, across all audit files.
     pub fn get_by_session(&self, session_id: &str) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.read_all_events()?;
+        let (events, _malformed) = self.read_all_events()?;
         Ok(events
             .into_iter()
             .filter(|e| e.session_id == session_id)
@@ -86,7 +88,7 @@ impl FileSystemAuditStore {
 
     /// Returns all events from a specific agent, across all audit files.
     pub fn get_by_agent(&self, agent_id: &str) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.read_all_events()?;
+        let (events, _malformed) = self.read_all_events()?;
         Ok(events
             .into_iter()
             .filter(|e| e.agent_id == agent_id)
@@ -98,7 +100,7 @@ impl FileSystemAuditStore {
         &self,
         event_type: &AuditEventType,
     ) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.read_all_events()?;
+        let (events, _malformed) = self.read_all_events()?;
         Ok(events
             .into_iter()
             .filter(|e| &e.event_type == event_type)
@@ -113,17 +115,51 @@ impl FileSystemAuditStore {
     /// Architecture Section 8.3 lists `getByIssue` as part of the
     /// `AuditStore` interface; this method implements it.
     pub fn get_by_issue(&self, issue_ref: &str) -> Result<Vec<AuditEvent>, AuditError> {
-        let events = self.read_all_events()?;
+        let (events, _malformed) = self.read_all_events()?;
         Ok(events
             .into_iter()
             .filter(|e| e.issue_ref.as_deref() == Some(issue_ref))
             .collect())
     }
 
+    /// Returns the list of malformed JSONL lines encountered when
+    /// reading the audit history. Each record carries the file path,
+    /// 1-indexed line number, and parse-error string so callers (audit
+    /// viewer, hook layer, tests) can surface or count corruption
+    /// deliberately rather than silently absorbing it.
+    ///
+    /// Empty result means the on-disk audit history was clean as of
+    /// the call. The same lines are reported on every call — there is
+    /// no de-duplication or rate-limiting; the caller decides what to
+    /// do with the information.
+    pub fn corruption_report(&self) -> Result<Vec<MalformedLine>, AuditError> {
+        let (_events, malformed) = self.read_all_events()?;
+        Ok(malformed)
+    }
+
     /// Reads all JSONL files in the audit directory, sorted by filename
     /// (which sorts chronologically due to YYYY-MM-DD naming), and
-    /// deserializes every line into an AuditEvent.
-    fn read_all_events(&self) -> Result<Vec<AuditEvent>, AuditError> {
+    /// deserialises every line into an AuditEvent.
+    ///
+    /// Returns the events in chronological-by-filename order plus a
+    /// list of malformed lines that were skipped. Audit data is
+    /// forensic, so a single corrupt line (partial write at crash,
+    /// disk corruption, manual edit, mixed-version schema) is reported
+    /// rather than aborting the whole query — JSONL is designed to
+    /// tolerate per-line failures. The `MalformedLine` records carry
+    /// enough context (file path, 1-indexed line number, parse error)
+    /// for the caller to surface corruption to a human; the raw line
+    /// content is deliberately not captured to avoid leaking tampered
+    /// payloads.
+    ///
+    /// TODO(phase-4): this read path scans every JSONL file and holds
+    /// the full deserialised history in memory. Acceptable while audit
+    /// volume is bounded (Phase 1 expects on the order of tens of MB).
+    /// SqliteAuditStore — the Phase 4 upgrade per architecture Section
+    /// 8.4 — replaces this with indexed queries and is the planned
+    /// answer to the scaling concern, not an in-place optimisation
+    /// here.
+    fn read_all_events(&self) -> Result<(Vec<AuditEvent>, Vec<MalformedLine>), AuditError> {
         let mut files: Vec<PathBuf> = fs::read_dir(&self.audit_dir)?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
@@ -134,39 +170,32 @@ impl FileSystemAuditStore {
         files.sort();
 
         let mut events = Vec::new();
+        let mut malformed = Vec::new();
         for file_path in files {
             let file = fs::File::open(&file_path)?;
             let reader = BufReader::new(file);
 
-            for (line_number, line) in reader.lines().enumerate() {
+            for (line_index, line) in reader.lines().enumerate() {
                 let line = line?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                // Log-and-skip malformed lines rather than aborting the
-                // entire query. Audit data is forensic — failing closed
-                // on a single corrupt line (partial write at crash,
-                // disk corruption, manual edit, mixed-version schema)
-                // would hide every prior event from queries. JSONL is
-                // designed to tolerate per-line failures. eprintln! is
-                // a placeholder until structured logging lands.
                 match serde_json::from_str::<AuditEvent>(&line) {
                     Ok(event) => events.push(event),
                     Err(err) => {
-                        eprintln!(
-                            "audit: skipping malformed line {} in {}: {}",
-                            // line_number is 0-indexed; user-facing
+                        malformed.push(MalformedLine {
+                            file: file_path.clone(),
+                            // line_index is 0-indexed; user-facing
                             // convention is 1-indexed.
-                            line_number + 1,
-                            file_path.display(),
-                            err
-                        );
+                            line_number: line_index + 1,
+                            error: err.to_string(),
+                        });
                     }
                 }
             }
         }
 
-        Ok(events)
+        Ok((events, malformed))
     }
 }
 
@@ -457,15 +486,14 @@ mod tests {
         // today's file. The malformed line is bracketed by valid events
         // so we can verify the iteration recovers.
         let today_filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
-        let today_path = tmp.path().join(".sdlc").join("audit").join(today_filename);
+        let today_path = tmp.path().join(".sdlc").join("audit").join(&today_filename);
 
-        let mut event_after = test_event(
+        let event_after = test_event(
             "evt-valid-2",
             "session-1",
             "agent-1",
             AuditEventType::FileWrite,
         );
-        event_after.id = "evt-valid-2".to_string();
         let valid_after_json = serde_json::to_string(&event_after).unwrap();
 
         let mut file = OpenOptions::new()
@@ -483,6 +511,52 @@ mod tests {
         assert_eq!(events.len(), 2, "expected two valid events, malformed line skipped");
         assert_eq!(events[0].id, "evt-valid-1");
         assert_eq!(events[1].id, "evt-valid-2");
+
+        // The corruption_report API surfaces the skipped line to
+        // callers so they can act on it (e.g., audit viewer UI flag,
+        // structured logging when it lands). The previous evt-valid-1
+        // is on line 1; the malformed line is line 2.
+        let report = store.corruption_report().unwrap();
+        assert_eq!(report.len(), 1, "expected exactly one malformed line");
+        assert_eq!(report[0].line_number, 2);
+        assert_eq!(report[0].file, today_path);
+        // The error message must not be empty — we want a diagnostic
+        // string available to callers — but we don't pin its exact
+        // contents because serde_json's wording can change.
+        assert!(
+            !report[0].error.is_empty(),
+            "expected a non-empty parse-error message"
+        );
+    }
+
+    #[test]
+    fn test_corruption_report_is_empty_when_audit_history_is_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        // No events logged — reading an empty audit dir yields no
+        // events and no malformed lines.
+        assert!(store.corruption_report().unwrap().is_empty());
+
+        // After well-formed writes the corruption report stays empty.
+        store
+            .log(&test_event(
+                "evt-1",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+        store
+            .log(&test_event(
+                "evt-2",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+
+        assert!(store.corruption_report().unwrap().is_empty());
     }
 
     #[test]
