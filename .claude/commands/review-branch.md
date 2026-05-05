@@ -38,6 +38,7 @@ Then collect, **writing each artefact to a temp file** so it can be passed to su
 - **Changed files list**: `git diff --name-only origin/main...<branch> > /tmp/saor-review-files.txt`.
 - **Branch metadata**: `git log --format='%h %s%n%n%b' origin/main..<branch> > /tmp/saor-review-commits.txt` for the commits being reviewed.
 - **PR description**: if `$ARGUMENTS` was a PR number, `/tmp/saor-review-pr.json` was already written above. Otherwise, try `gh pr view <branch> --json title,body,number > /tmp/saor-review-pr.json 2>/dev/null` — non-zero exit is fine, it just means no PR is open for this branch yet.
+- **Commit SHA at review time**: `git rev-parse <branch>` — capture the SHA of the branch tip. Hold this for step 5 (state persistence). Re-review later uses this SHA to compute the fix diff (`<this-sha>..HEAD`).
 
 If the diff file is empty (the branch matches `main`), stop and tell Kevin there is nothing to review.
 
@@ -88,7 +89,30 @@ Then spawn one more Task subagent:
   3. The diff line count (compute via `wc -l /tmp/saor-review-diff.txt`) so the coordinator can apply the suspicious-unanimity threshold of 200 lines.
   4. An explicit instruction to begin its response with `# Review Synthesis` and produce only the structured output (no preamble), and to include the three raw reviewer reports verbatim under the `## Raw reviewer reports` section as the coordinator prompt requires.
 
-### 5. Present the result to Kevin
+### 5. Persist run state for future re-review
+
+Before presenting the synthesis to Kevin, persist the run to `.claude/review-state/<branch-name>/<timestamp>/` so a future `/re-review-branch` invocation can read the prior reports and compute the fix diff. Branch names containing slashes (e.g., `4/sqlite-memory-store`) create nested directories — that is intended.
+
+- Compute a filesystem-safe timestamp: `date -u +%Y%m%dT%H%M%SZ` (compact, sortable, no colons).
+- Create the directory: `mkdir -p .claude/review-state/<branch>/<timestamp>/`.
+- Copy the three reviewer reports and the coordinator synthesis into the directory:
+  - `report-1-design.md` (from `/tmp/saor-review-report-1-design.md`)
+  - `report-2-security.md` (from `/tmp/saor-review-report-2-security.md`)
+  - `report-3-testability.md` (from `/tmp/saor-review-report-3-testability.md`)
+  - `synthesis.md` — the coordinator's full output captured in step 4
+- Write `meta.json` with this schema:
+  ```json
+  {
+    "branch": "<branch-name>",
+    "commit_sha": "<sha-from-step-1>",
+    "timestamp": "<iso-8601>",
+    "run_mode": "initial"
+  }
+  ```
+
+`.claude/review-state/` is gitignored — this state is per-developer and regenerable.
+
+### 6. Present the result to Kevin
 
 Output the coordinator's synthesis directly to Kevin. The coordinator already includes the three raw reviewer reports at the bottom of its output, so a single message with the coordinator's full output is sufficient. Do not add your own summary on top — the coordinator's structure is the answer.
 
