@@ -60,8 +60,11 @@ impl SqliteMemoryStore {
     /// Persists a memory entry. The FTS5 index is updated automatically
     /// via the insert trigger defined in schema.rs.
     pub fn write_entry(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
-        let metadata_json =
-            serde_json::to_string(&entry.metadata).unwrap_or_else(|_| "null".to_string());
+        // Serialising a serde_json::Value cannot fail — Value is by
+        // construction a valid JSON tree. Use expect() to make the
+        // invariant explicit rather than substituting a silent fallback.
+        let metadata_json = serde_json::to_string(&entry.metadata)
+            .expect("serde_json::Value is always serialisable");
 
         self.conn.execute(
             "INSERT INTO memory_entries (id, project_id, category, content, metadata, created_by, created_at, weight)
@@ -131,12 +134,25 @@ pub(crate) fn row_to_entry(row: &Row<'_>) -> Result<MemoryEntry, rusqlite::Error
         }
     };
 
+    let id: String = row.get(0)?;
     let metadata_str: String = row.get(4)?;
-    let metadata: serde_json::Value =
-        serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str).map_err(|source| {
+        // Surface the parse failure rather than silently substituting Null,
+        // which would mask data corruption. Wrap the MemoryError in a
+        // FromSqlConversionFailure so it propagates through the rusqlite
+        // query callback path, matching the InvalidCategory pattern above.
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(super::schema::MemoryError::InvalidMetadata {
+                id: id.clone(),
+                source,
+            }),
+        )
+    })?;
 
     Ok(MemoryEntry {
-        id: row.get(0)?,
+        id,
         project_id: row.get(1)?,
         category,
         content: row.get(3)?,
@@ -246,6 +262,45 @@ mod tests {
         for (id, expected_category) in &categories {
             let read_back = store.read_entry(id).unwrap();
             assert_eq!(&read_back.category, expected_category);
+        }
+    }
+
+    /// Writing through `write_entry` always produces valid JSON in the
+    /// `metadata` column. But if the column is corrupted out-of-band
+    /// (partial write, external tool, schema migration error), `read_entry`
+    /// must surface the corruption rather than silently substituting null.
+    #[test]
+    fn test_read_entry_with_invalid_metadata_returns_invalid_metadata_error() {
+        let store = SqliteMemoryStore::new_in_memory().unwrap();
+        insert_test_project(&store);
+
+        // Insert a row directly via SQL with a metadata value that is not
+        // valid JSON. This simulates corruption — the public write_entry
+        // API cannot produce this state.
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_entries (id, project_id, category, content, metadata, created_by, created_at, weight)
+                 VALUES ('corrupt-meta', 'test-project', 'learning', 'corrupted entry', 'not valid json', 'agent:test', '2026-02-25T12:00:00Z', 1.0)",
+                [],
+            )
+            .unwrap();
+
+        let result = store.read_entry("corrupt-meta");
+        assert!(result.is_err(), "expected InvalidMetadata error, got Ok");
+
+        match result.unwrap_err() {
+            MemoryError::Database(rusqlite::Error::FromSqlConversionFailure(
+                _,
+                _,
+                inner,
+            )) => match inner.downcast_ref::<MemoryError>() {
+                Some(MemoryError::InvalidMetadata { id, .. }) => {
+                    assert_eq!(id, "corrupt-meta");
+                }
+                other => panic!("expected InvalidMetadata, got: {other:?}"),
+            },
+            other => panic!("expected FromSqlConversionFailure wrapping InvalidMetadata, got: {other:?}"),
         }
     }
 }

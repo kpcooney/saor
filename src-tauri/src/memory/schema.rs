@@ -30,6 +30,18 @@ pub enum MemoryError {
 
     #[error("invalid category: {0}")]
     InvalidCategory(String),
+
+    /// The `metadata` column for an entry could not be parsed as JSON.
+    /// Indicates corruption (partial write, external write to the DB, or
+    /// migration error) — never the result of a normal write through
+    /// SqliteMemoryStore, which serialises a serde_json::Value that
+    /// always produces valid JSON.
+    #[error("invalid metadata for entry {id}: {source}")]
+    InvalidMetadata {
+        id: String,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// Categories for memory entries. Each category serves a distinct purpose
