@@ -20,7 +20,7 @@
 use rusqlite::{params, Connection};
 
 use super::schema::{MemoryEntry, MemoryError};
-use super::store::row_to_entry;
+use super::store::{row_to_entry, unwrap_row_to_entry_error};
 
 /// Searches memory entries using FTS5 keyword matching, returning results
 /// ranked by BM25 relevance.
@@ -49,9 +49,18 @@ pub fn keyword_search(
          LIMIT ?2",
     )?;
 
+    // FTS index is populated by SQLite triggers — see schema.rs (the
+    // memory_fts_insert/delete/update triggers) and ADR-003 for the
+    // rationale. This function only reads from the index.
+    //
+    // Per-row errors from row_to_entry are passed through
+    // unwrap_row_to_entry_error so InvalidCategory / InvalidMetadata
+    // surface as top-level MemoryError variants rather than being
+    // buried inside MemoryError::Database(FromSqlConversionFailure(...)).
     let entries = stmt
         .query_map(params![query, limit], row_to_entry)?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unwrap_row_to_entry_error)?;
 
     Ok(entries)
 }
@@ -415,10 +424,26 @@ mod tests {
         );
     }
 
+    /// Counts rows in `memory_fts` matching the FTS query. Used to
+    /// assert against the index *directly* — `keyword_search` JOINs
+    /// against `memory_entries` and would mask a stale FTS rowid by
+    /// dropping the unmatched JOIN, so it cannot distinguish a working
+    /// from a broken delete trigger on its own.
+    fn count_fts_matches(conn: &rusqlite::Connection, query: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH ?1",
+            params![query],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
     /// FTS5 sync triggers are the entire subject of ADR-003. The insert
     /// trigger is exercised by every other test through `write_entry`.
     /// This test exercises the delete trigger by removing a row via
-    /// direct SQL and verifying it disappears from the search index.
+    /// direct SQL and verifying the FTS index itself no longer contains
+    /// the row's terms — querying `memory_fts` directly rather than
+    /// through `keyword_search`'s JOIN, which would mask a no-op trigger.
     #[test]
     fn test_delete_trigger_removes_entry_from_fts_index() {
         let store = SqliteMemoryStore::new_in_memory().unwrap();
@@ -428,7 +453,7 @@ mod tests {
         store
             .write_entry(&make_entry(
                 "to-delete",
-                "deletable entry about widgets",
+                "deletable entry about cromulence",
                 MemoryCategory::Learning,
             ))
             .unwrap();
@@ -440,9 +465,9 @@ mod tests {
             ))
             .unwrap();
 
-        // Confirm both are searchable initially.
-        let before = keyword_search(conn, "widgets", 10).unwrap();
-        assert_eq!(before.len(), 2);
+        // Both terms are present in the FTS index initially.
+        assert_eq!(count_fts_matches(conn, "cromulence"), 1);
+        assert_eq!(count_fts_matches(conn, "widgets"), 1);
 
         // Delete one row directly via SQL — exercises the delete trigger.
         conn.execute(
@@ -451,7 +476,19 @@ mod tests {
         )
         .unwrap();
 
-        let after = keyword_search(conn, "widgets", 10).unwrap();
+        // The deleted row's term must no longer appear in the FTS index.
+        // A no-op delete trigger would leave the term indexed and this
+        // assertion would fail — the JOIN in keyword_search cannot mask
+        // it because we are querying memory_fts directly.
+        assert_eq!(
+            count_fts_matches(conn, "cromulence"),
+            0,
+            "delete trigger must remove the row's terms from memory_fts"
+        );
+        assert_eq!(count_fts_matches(conn, "widgets"), 1);
+
+        // And keyword_search agrees — the kept entry is the only result.
+        let after = keyword_search(conn, "widgets OR cromulence", 10).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "kept");
     }
@@ -498,13 +535,13 @@ mod tests {
         );
     }
 
-    /// After a delete, the FTS index should not return a stale rowid
-    /// pointing at a now-missing memory_entries row. If the delete
-    /// trigger were broken (wrong column or missing), the JOIN in
-    /// keyword_search would either return zero rows (the most likely
-    /// failure mode) or surface a SQL error — never a phantom result.
+    /// After a delete, the only entry's terms must be gone from the FTS
+    /// index. Asserting against `memory_fts` directly so a broken
+    /// delete trigger would fail this test — `keyword_search`'s JOIN
+    /// against `memory_entries` would silently drop a stale rowid and
+    /// could not distinguish a working trigger from a broken one.
     #[test]
-    fn test_keyword_search_does_not_return_stale_rowid_after_delete() {
+    fn test_delete_trigger_purges_sole_entry_from_fts_index() {
         let store = SqliteMemoryStore::new_in_memory().unwrap();
         insert_test_project(&store);
         let conn = store.connection();
@@ -517,14 +554,25 @@ mod tests {
             ))
             .unwrap();
 
+        // Confirm the term is in the FTS index before deletion.
+        assert_eq!(count_fts_matches(conn, "ephemerally"), 0);
+        assert_eq!(count_fts_matches(conn, "deleted"), 1);
+
         conn.execute(
             "DELETE FROM memory_entries WHERE id = ?1",
             params!["ephemeral"],
         )
         .unwrap();
 
-        // The search must return no results AND must not error from a
-        // dangling JOIN against a missing memory_entries row.
+        // The FTS index itself must no longer contain the term.
+        assert_eq!(
+            count_fts_matches(conn, "deleted"),
+            0,
+            "delete trigger must purge the sole entry's terms from memory_fts"
+        );
+
+        // And keyword_search agrees — no results returned, no SQL error
+        // from a dangling JOIN.
         let results = keyword_search(conn, "deleted", 10).unwrap();
         assert!(results.is_empty());
     }

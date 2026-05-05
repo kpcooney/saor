@@ -98,7 +98,7 @@ impl SqliteMemoryStore {
             .query_row(params![id], row_to_entry)
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => MemoryError::NotFound(id.to_string()),
-                other => MemoryError::Database(other),
+                other => unwrap_row_to_entry_error(other),
             })?;
 
         Ok(entry)
@@ -116,6 +116,12 @@ impl SqliteMemoryStore {
 ///
 /// Expected column order: id, project_id, category, content, metadata,
 /// created_by, created_at, weight.
+///
+/// Returns `rusqlite::Error::FromSqlConversionFailure` wrapping a
+/// `MemoryError` (`InvalidCategory` or `InvalidMetadata`) when a row
+/// cannot be mapped. Callers should pass that error through
+/// `unwrap_row_to_entry_error` to surface the domain variant directly
+/// rather than burying it inside `MemoryError::Database`.
 pub(crate) fn row_to_entry(row: &Row<'_>) -> Result<MemoryEntry, rusqlite::Error> {
     let category_str: String = row.get(2)?;
     let category = match category_str.as_str() {
@@ -161,6 +167,36 @@ pub(crate) fn row_to_entry(row: &Row<'_>) -> Result<MemoryEntry, rusqlite::Error
         created_at: row.get(6)?,
         weight: row.get(7)?,
     })
+}
+
+/// Recovers a `MemoryError` from a `rusqlite::Error` produced by
+/// `row_to_entry`. If the error is a `FromSqlConversionFailure`
+/// wrapping a domain `MemoryError`, the inner variant is returned
+/// directly (so `InvalidCategory` / `InvalidMetadata` are visible to
+/// callers as top-level discriminants). Anything else falls through to
+/// `MemoryError::Database`.
+///
+/// This compensates for `row_to_entry`'s inverted error hierarchy
+/// (the wrapping is required by rusqlite's query callback signature).
+/// Removing the wrapping at the row mapper is tracked separately under
+/// the suggestions in #24; this helper is the localised mitigation.
+pub(crate) fn unwrap_row_to_entry_error(err: rusqlite::Error) -> MemoryError {
+    if let rusqlite::Error::FromSqlConversionFailure(idx, ty, inner) = err {
+        // Take ownership of the inner box and downcast. If the inner
+        // type is MemoryError, return it as-is (full source preserved).
+        // Otherwise, reconstitute the FromSqlConversionFailure and wrap
+        // it in Database.
+        match inner.downcast::<MemoryError>() {
+            Ok(memory_err) => *memory_err,
+            Err(other_inner) => MemoryError::Database(rusqlite::Error::FromSqlConversionFailure(
+                idx,
+                ty,
+                other_inner,
+            )),
+        }
+    } else {
+        MemoryError::Database(err)
+    }
 }
 
 #[cfg(test)]
@@ -290,17 +326,10 @@ mod tests {
         assert!(result.is_err(), "expected InvalidMetadata error, got Ok");
 
         match result.unwrap_err() {
-            MemoryError::Database(rusqlite::Error::FromSqlConversionFailure(
-                _,
-                _,
-                inner,
-            )) => match inner.downcast_ref::<MemoryError>() {
-                Some(MemoryError::InvalidMetadata { id, .. }) => {
-                    assert_eq!(id, "corrupt-meta");
-                }
-                other => panic!("expected InvalidMetadata, got: {other:?}"),
-            },
-            other => panic!("expected FromSqlConversionFailure wrapping InvalidMetadata, got: {other:?}"),
+            MemoryError::InvalidMetadata { id, .. } => {
+                assert_eq!(id, "corrupt-meta");
+            }
+            other => panic!("expected InvalidMetadata, got: {other:?}"),
         }
     }
 }
