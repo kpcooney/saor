@@ -14,6 +14,10 @@
 // See docs/architecture/sdlc-agent-architecture-research-v4.md Section 6
 // for the memory architecture and schema design.
 
+pub mod fts;
 pub mod schema;
 pub mod store;
-pub mod fts;
+
+// Re-export the public API for ergonomic imports.
+pub use schema::{MemoryCategory, MemoryEntry, MemoryError};
+pub use store::SqliteMemoryStore;
