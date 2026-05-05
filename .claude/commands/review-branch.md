@@ -21,14 +21,14 @@ Follow these in order.
 
 ### 1. Gather context
 
-Determine the target branch (`$ARGUMENTS` if non-empty, otherwise the current branch via `git rev-parse --abbrev-ref HEAD`). Then collect:
+Determine the target branch (`$ARGUMENTS` if non-empty, otherwise the current branch via `git rev-parse --abbrev-ref HEAD`). Then collect, **writing each artefact to a temp file** so it can be passed to subagents by path rather than inlined into Task prompts (inlining 1000+ lines into a Task prompt risks hitting input size limits):
 
-- **Diff vs main**: `git diff origin/main...<branch>` (use the three-dot form to compute the diff from the merge-base, not the tip).
-- **Changed files list**: `git diff --name-only origin/main...<branch>`.
-- **PR description, if any**: `gh pr view <branch> --json title,body,number 2>/dev/null` — empty result is fine, it just means no PR is open yet.
-- **Branch metadata**: `git log --oneline origin/main..<branch>` for the commits being reviewed.
+- **Diff vs main**: `git diff origin/main...<branch> > /tmp/saor-review-diff.txt` (use the three-dot form to compute the diff from the merge-base, not the tip).
+- **Changed files list**: `git diff --name-only origin/main...<branch> > /tmp/saor-review-files.txt`.
+- **Branch metadata**: `git log --format='%h %s%n%n%b' origin/main..<branch> > /tmp/saor-review-commits.txt` for the commits being reviewed.
+- **PR description, if any**: `gh pr view <branch> --json title,body,number > /tmp/saor-review-pr.json 2>/dev/null` — non-zero exit is fine, it just means no PR is open yet.
 
-If the diff is empty (the branch matches `main`), stop and tell Kevin there is nothing to review.
+If the diff file is empty (the branch matches `main`), stop and tell Kevin there is nothing to review.
 
 ### 2. Read the reviewer prompts
 
@@ -46,28 +46,36 @@ For each reviewer, use:
 
 - `subagent_type: "general-purpose"`
 - `description`: short — `"Design & Code Quality review"`, `"Security & Edge Cases review"`, `"Testability & Behavior review"`.
-- `prompt`: a self-contained briefing that includes:
-  1. The full text of the reviewer's role prompt file (read in step 2).
-  2. The diff (verbatim, in a fenced code block).
-  3. The list of changed files.
-  4. The PR description if one was found, otherwise the most recent commit messages on the branch as a stand-in.
-  5. The contents of `CLAUDE.md` (or, if too long for the prompt, an instruction to the subagent to read it via the Read tool).
-  6. A pointer (path) to `docs/architecture/sdlc-agent-architecture-research-v4.md` and a brief instruction to read sections relevant to the changed files.
-  7. An explicit instruction to produce the structured output defined in the reviewer's Output Format section, and nothing else — no preamble, no commentary outside the format.
+- `prompt`: a compact briefing that points the subagent at files to read, rather than inlining content. The subagent has the Read tool. Include:
+  1. The path to the reviewer's role prompt file (`standards/review-assistance/<role>.md`) with an instruction to read it in full and follow its Output Format strictly.
+  2. The path to the diff file (`/tmp/saor-review-diff.txt`) and the changed-files list (`/tmp/saor-review-files.txt`).
+  3. The path to the commits file (`/tmp/saor-review-commits.txt`), and to the PR description JSON (`/tmp/saor-review-pr.json`) if it was created in step 1.
+  4. An instruction to read `CLAUDE.md` for project rules.
+  5. The path `docs/architecture/sdlc-agent-architecture-research-v4.md` with an instruction to read sections relevant to the changed files (named explicitly when the touched modules are obvious — e.g. Section 6 for memory, Section 8 for audit).
+  6. The repo root path (the working directory).
+  7. An explicit instruction to begin its response with the heading from its role file's Output Format and produce only that structured output.
+
+Keep the briefing short — two or three hundred words is plenty. The reviewer's role file carries the substance.
 
 Do not include any reference to the other two reviewers' axes — keep each review independent.
 
 ### 4. Spawn the coordinator
 
-Once all three reviewer Tasks have returned, read `standards/review-assistance/coordinator.md`. Spawn one more Task subagent:
+Once all three reviewer Tasks have returned, **write each report to its own temp file**:
+
+- `/tmp/saor-review-report-1-design.md`
+- `/tmp/saor-review-report-2-security.md`
+- `/tmp/saor-review-report-3-testability.md`
+
+Then spawn one more Task subagent:
 
 - `subagent_type: "general-purpose"`
 - `description`: `"Coordinator synthesis"`
-- `prompt`: includes:
-  1. The full text of the coordinator prompt file.
-  2. The three reviewer reports verbatim, each in its own labeled section (`## Design & Code Quality report`, etc.).
-  3. The diff line count (so the coordinator can apply the suspicious-unanimity threshold of 200 lines).
-  4. An explicit instruction to produce the structured output defined in the coordinator prompt's Output Format section.
+- `prompt`: a compact briefing pointing at:
+  1. The path `standards/review-assistance/coordinator.md` with an instruction to read it and follow its Output Format strictly.
+  2. The three report file paths above.
+  3. The diff line count (compute via `wc -l /tmp/saor-review-diff.txt`) so the coordinator can apply the suspicious-unanimity threshold of 200 lines.
+  4. An explicit instruction to begin its response with `# Review Synthesis` and produce only the structured output (no preamble), and to include the three raw reviewer reports verbatim under the `## Raw reviewer reports` section as the coordinator prompt requires.
 
 ### 5. Present the result to Kevin
 

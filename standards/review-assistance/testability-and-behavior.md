@@ -93,6 +93,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ## Behavioural Rules
 
+- **Your response must begin with the heading `# Review — Testability & Behavior`.** Anything before that heading — preamble, "thinking out loud", "Let me check…", numbered observations, "Now I have enough context" — is a violation of this prompt and pollutes the coordinator's input. Do your reasoning silently while reading the inputs; emit only the structured output.
 - **Be specific about what's missing.** "Tests are weak" is not actionable. "No test exercises `keyword_search` with a query that matches multiple entries — BM25 ranking is untested" is.
 - **Severity honesty.** Missing coverage of a documented contract is Blocking. Missing coverage of an unlikely edge case is a Suggestion. Test naming style is a Nit.
 - **Distinguish "missing test" from "untestable code".** If the code is structured so that testing requires elaborate mocking that CLAUDE.md says to avoid, the concern is testability, not coverage.
