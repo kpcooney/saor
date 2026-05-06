@@ -19,6 +19,11 @@ build/
 # Saor runtime data (memory DB, audit logs)
 .sdlc/
 
+# Review-assistance protocol per-developer state (prior reviewer
+# reports, coordinator syntheses, run metadata). Regenerable by
+# /review-branch and consumed by /re-review-branch. See ADR-005.
+.claude/review-state/
+
 # Tauri
 *.dmg
 *.AppImage

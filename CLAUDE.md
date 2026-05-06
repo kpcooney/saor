@@ -133,17 +133,23 @@ Examples: `12/sqlite-memory-store`, `15/jsonl-audit-writer`, `18/code-agent-iden
 
 ### Review Assistance Protocol
 
-To accelerate PR review without compromising the merge gate, the project uses a Claude-Code-orchestrated three-reviewer + coordinator pattern, defined in [ADR-004](docs/adr/004-review-assistance-protocol.md). The reviewer agents are **advisory** — Kevin remains the merge gate, and the agents never recommend "approve" or "block".
+To accelerate PR review without compromising the merge gate, the project uses a Claude-Code-orchestrated reviewer protocol — three blind reviewer agents plus a coordinator — for both initial review ([ADR-004](docs/adr/004-review-assistance-protocol.md)) and post-fix re-review ([ADR-005](docs/adr/005-targeted-re-review-pattern.md)). The reviewer agents are **advisory** — Kevin remains the merge gate, and the agents never recommend "approve" or "block".
 
-**When to invoke**: Kevin runs `/review-branch` (or `/review-branch <branch-name>`) during a Claude Code session when he is about to review a PR or has just pushed new commits to a feature branch. The command is defined at `.claude/commands/review-branch.md`.
+**Slash command**: `/review-branch` is the single entry point for both modes. It is defined at `.claude/commands/review-branch.md`.
 
-**What it does**: spawns three blind reviewer subagents in parallel — Design & Code Quality, Security & Edge Cases, Testability & Behavior — each with the prompt from `standards/review-assistance/`. After all three return, a coordinator subagent synthesises the reports into convergence (concerns flagged by 2+ reviewers, listed first), single-reviewer concerns, explicit disagreements, and a "suspicious unanimity" flag if the diff exceeds 200 lines and all three reviewers reported zero concerns.
+- **Initial review** (default): `/review-branch [branch-name | PR-number]`. Spawns three blind reviewer subagents in parallel — Design & Code Quality, Security & Edge Cases, Testability & Behavior — each with the prompt from `standards/review-assistance/`. A coordinator subagent then synthesises the reports into convergence (concerns flagged by 2+ reviewers, listed first), single-reviewer concerns, explicit disagreements, and a "suspicious unanimity" flag if the diff exceeds 200 lines and all three reviewers reported zero concerns. The run's reports + synthesis are persisted to `.claude/review-state/<branch>/<timestamp>/` for use by the post-fix re-review.
 
-**What the output is**: the coordinator's structured synthesis, with the three raw reviewer reports appended for spot-checking. Kevin reads the synthesis alongside the diff and decides what to merge. The agents do not gate merge in any automated way — there is no CI workflow, no required status check, no branch protection change.
+- **Re-review** (post-fix verification): `/review-branch --review-fixes [branch-name | PR-number]`. Reads the most recent prior run for the branch, computes the diff of the fix (`<prior-commit>..HEAD`), and spawns three blind re-reviewer subagents — each receives **only its own prior concerns** plus the fix diff. Each re-reviewer emits a per-concern verdict (`Addressed` / `Partially addressed` / `Not addressed` / `No longer applicable`) with evidence cited from the fix diff, plus a section flagging new concerns the fix itself introduced. A re-coordinator synthesises verdicts across reviewers, surfacing outstanding work and any new convergent concerns. Kevin still decides whether the loop is closed — the re-coordinator never says "ship it" or "iterate".
 
-**Where prompts live**: `standards/review-assistance/`. Updates to reviewer behaviour go through the normal PR workflow — a prompt change is a behaviour change and warrants the same review attention as a code change.
+**When to invoke**: initial review when about to review a PR or just after pushing new commits to a feature branch. Re-review after applying fixes in response to a prior run.
 
-**Migration path**: when the agent harness lands (issues #7 and #11), the reviewer prompts are read directly by the harness via the `standards://review-assistance/<role>` URI scheme without modification. Only the spawning mechanism changes.
+**Output**: in both modes, the coordinator's structured synthesis with the three raw reviewer reports appended for spot-checking. Kevin reads the synthesis alongside the diff and decides what to do. The agents do not gate merge in any automated way — there is no CI workflow, no required status check, no branch protection change.
+
+**State on disk**: `.claude/review-state/<branch>/<timestamp>/` (gitignored, per-developer, regenerable). Each run writes the three reviewer reports, the coordinator synthesis, and `meta.json` (branch, commit SHA, timestamp, run mode). Pruned to the 5 most recent runs per branch — older runs are deleted automatically after each new run.
+
+**Where prompts live**: `standards/review-assistance/` (initial reviewer prompts plus the `re-review-*.md` variants for post-fix verification). Updates to reviewer behaviour go through the normal PR workflow — a prompt change is a behaviour change and warrants the same review attention as a code change.
+
+**Migration path**: when the agent harness lands (issues #7 and #11), the reviewer and re-reviewer prompts are read directly by the harness via the `standards://review-assistance/<role>` URI scheme without modification. Only the spawning mechanism changes.
 
 ### Architectural Decisions
 If you encounter a design question not covered by the architecture document, **do not just pick an answer and keep going**. If in doubt about the right direction, prompt for feedback — it's better to ask than to build on the wrong assumption. If the decision is significant enough to affect future work, write an ADR in `docs/adr/` using the MADR template from `standards/documentation-standards/adr-format.md`. ADRs go through the same PR workflow — branch, write, open PR for review.
