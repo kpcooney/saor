@@ -256,32 +256,15 @@ After completing each issue (or when context is running low), post a brief statu
 - Context: (estimated context usage — low/medium/high — and whether to continue or hand off)
 ```
 
-### Handoff Summaries
+### Resuming after a session ends
 
-When a session ends (context exhaustion, natural stopping point, or explicit request), write a handoff summary to `docs/handoff/session-NNN.md` (zero-padded three digits). This file gives the next session everything it needs to pick up the work without re-reading the entire codebase.
+No per-session handoff file is written. The next session orients via:
 
-Handoff format:
+- **The auto-memory system** at `~/.claude/projects/<project>/memory/` — captures conventions, preferences, and protocol state that aren't in the codebase.
+- **`git log`, open PRs, open issues** — capture work history, in-progress state, and what's next.
+- **CLAUDE.md and the architecture doc** — capture project rules and design.
 
-```markdown
-# Session NNN — Handoff Summary
-
-**Date**: YYYY-MM-DD
-**Issues worked**: #NN, #NN
-
-## What was done
-(Concise list of completed work, with PR/commit references)
-
-## What's in progress
-(Anything started but not finished — branch names, open PRs, known issues)
-
-## What's next
-(Prioritized list of next tasks, with issue numbers)
-
-## Key context for the next session
-(Anything the next session needs to know that isn't in CLAUDE.md or the architecture doc — gotchas, decisions made during the session, things that didn't work)
-```
-
-The next session should read the most recent handoff file and CLAUDE.md before starting work.
+Handoff files were tried earlier and dropped because every section duplicated one of the above sources and became stale immediately.
 
 ## What Not To Do
 
