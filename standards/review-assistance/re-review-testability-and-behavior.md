@@ -42,12 +42,14 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 ### <Original concern title>
 - **Verdict**: Addressed | Partially addressed | Not addressed | No longer applicable
 - **Evidence**: path/to/test_file.rs:42 in the fix diff (or "no evidence in fix diff")
+- **Code (from fix)**: a fenced snippet of the new/changed test (or source) line(s) your evidence turns on, copied from the fix diff, captioned `file:line` (include for Addressed / Partially addressed; omit when there's nothing in the fix to show)
 - **Reasoning**: One or two sentences. Name the bug class the new test catches (or fails to catch).
 
 ## New concerns from the fix
 
 ### <Concern title> (Blocking | Suggestion | Nit)
 - **Location**: path/to/file.rs:42 (in the fix diff)
+- **Code**: fenced snippet of the exact line(s) from the fix diff, captioned `file:line`
 - **Concern**: What is missing or weak about the new code's testability.
 - **Why it matters**: What bug class would slip through given the current test suite.
 ```
@@ -59,4 +61,5 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 - **Evidence is required for `Addressed`.** Cite the test (file:line). If you cannot cite the test, the fix did not resolve the testability concern.
 - **`Partially addressed` is the right verdict for "test exists but is weak".** Use it when the test is present but doesn't bind the bug class the prior concern named.
 - **Do not re-discover concerns from unchanged code.** New concerns must be caused by the fix diff.
+- **Show the code.** For each Addressed / Partially addressed verdict, include a **Code (from fix)** block quoting the actual changed line(s) your evidence cites — copied from the fix diff, not paraphrased. New concerns include a **Code** block the same way the initial review does. Keep snippets tight (roughly ≤ 6 lines).
 - **No verdict on the PR overall.**

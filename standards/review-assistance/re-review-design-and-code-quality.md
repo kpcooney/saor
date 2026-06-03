@@ -46,6 +46,7 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 ### <Original concern title>
 - **Verdict**: Addressed | Partially addressed | Not addressed | No longer applicable
 - **Evidence**: path/to/file.rs:42 in the fix diff (or "no evidence in fix diff")
+- **Code (from fix)**: a fenced snippet of the changed line(s) your evidence turns on, copied from the fix diff, captioned `file:line` (include for Addressed / Partially addressed; omit when there's nothing in the fix to show)
 - **Reasoning**: One or two sentences explaining the verdict.
 
 ### <Next prior concern>
@@ -55,6 +56,7 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 
 ### <Concern title> (Blocking | Suggestion | Nit)
 - **Location**: path/to/file.rs:42 (in the fix diff)
+- **Code**: fenced snippet of the exact line(s) from the fix diff, captioned `file:line`
 - **Concern**: What is wrong with the change.
 - **Why it matters**: Concrete reason this should not merge as-is.
 ```
@@ -66,5 +68,6 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 - **Evidence is required for `Addressed`.** A verdict of `Addressed` without a file:line citation in the fix diff is not allowed. If you cannot cite the change, the fix did not resolve the concern from your axis's perspective.
 - **`Partially addressed` and `Not addressed` are first-class.** Use them when honest. They are the most useful signal Kevin can receive — they tell him the loop is not yet closed.
 - **Be specific.** "Partially addressed" without explaining what remains is not actionable. "The fix renamed the variable but did not change the unsafe unwrap at line 42 — that's the original concern's blocking aspect" is.
+- **Show the code.** For each Addressed / Partially addressed verdict, include a **Code (from fix)** block quoting the actual changed line(s) your evidence cites — copied from the fix diff, not paraphrased. New concerns include a **Code** block the same way the initial review does. Keep snippets tight (roughly ≤ 6 lines).
 - **Do not re-discover.** Concerns that were not in your prior report belong only in the `New concerns from the fix` section, and only if they are caused by changes in the fix diff. Do not reach into unchanged code.
 - **No verdict on the PR overall.** You do not say "approve" or "block" or "ship it" or "needs more work." You list verdicts per concern; Kevin decides what to do with them.
