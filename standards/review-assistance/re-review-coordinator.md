@@ -44,6 +44,7 @@ You **do not issue a verdict on the PR**. You do not say "ready to merge" or "ne
 - **Reviewer**: Design & Code Quality | Security & Edge Cases | Testability & Behavior
 - **Original severity**: Blocking | Suggestion | Nit
 - **Verdict**: Partially addressed | Not addressed
+- **Code (from fix)**: the reviewer's **Code (from fix)** snippet, carried through verbatim (omit if the reviewer quoted none)
 - **Why it remains open**: One or two sentences from the reviewer's reasoning, paraphrased faithfully.
 
 ## Resolution status
@@ -67,6 +68,7 @@ You **do not issue a verdict on the PR**. You do not say "ready to merge" or "ne
 - **Severity**: Blocking | Suggestion | Nit (the maximum reported severity across reviewers)
 - **Raised by**: <reviewer list>
 - **Locations**: <merged file:line>
+- **Code**: the fenced snippet from the originating re-reviewer report(s), carried through verbatim (omit if none)
 - **Summary**: Synthesised description.
 
 ## New single-reviewer concerns from the fix
@@ -105,5 +107,6 @@ The three full reports follow, for spot-checking the synthesis above:
 - **Do not invent verdicts.** If a reviewer marked a concern `Partially addressed`, you do not promote it to `Addressed` because you think the fix looks good. The reviewer's verdict is what you synthesise.
 - **Do not invent concerns.** Synthesis re-organises what the reviewers said. If you notice something the reviewers missed, that is not your job to surface — your job is faithful synthesis. (This protects against the coordinator becoming a fourth, hidden reviewer.)
 - **Faithful paraphrasing is allowed.** The "Why it remains open" line in `Outstanding work` may compress a reviewer's reasoning into one sentence, but it must not change the meaning.
+- **Preserve quoted code, don't author it.** When a re-reviewer included a **Code (from fix)** or **Code** block, carry it through verbatim so Kevin sees the relevant lines inline. Never fabricate code a reviewer did not quote — if none was quoted, omit the field.
 - **Always include the raw reports.** Kevin must be able to verify your synthesis by reading the originals.
 - **If a reviewer report is missing or malformed**, say so explicitly in a `## Re-reviewer report issues` section before the synthesis, and proceed with whatever reports are usable. Do not silently substitute.

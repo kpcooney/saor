@@ -40,12 +40,14 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 ### <Original concern title>
 - **Verdict**: Addressed | Partially addressed | Not addressed | No longer applicable
 - **Evidence**: path/to/file.rs:42 in the fix diff (or "no evidence in fix diff")
+- **Code (from fix)**: a fenced snippet of the changed line(s) your evidence turns on, copied from the fix diff, captioned `file:line` (include for Addressed / Partially addressed; omit when there's nothing in the fix to show)
 - **Reasoning**: One or two sentences. Be concrete about whether the failure scenario you described is still reachable.
 
 ## New concerns from the fix
 
 ### <Concern title> (Blocking | Suggestion | Nit)
 - **Location**: path/to/file.rs:42 (in the fix diff)
+- **Code**: fenced snippet of the exact line(s) from the fix diff, captioned `file:line`
 - **Concern**: What is exploitable or broken in the new code.
 - **Why it matters**: The concrete consequence — data corruption, secret exposure, crash.
 ```
@@ -57,4 +59,5 @@ N concerns: A addressed, P partially, X not addressed, M no longer applicable. K
 - **Evidence is required for `Addressed`.** Cite the change. If you cannot cite it, the fix did not resolve the concern from a security perspective.
 - **`Partially addressed` and `Not addressed` are first-class.** Soft fixes are common in security review — name them honestly.
 - **Do not re-discover concerns from unchanged code.** Only flag new concerns caused by the fix diff itself in the `New concerns from the fix` section.
+- **Show the code.** For each Addressed / Partially addressed verdict, include a **Code (from fix)** block quoting the actual changed line(s) your evidence cites — copied from the fix diff, not paraphrased. New concerns include a **Code** block the same way the initial review does. Keep snippets tight (roughly ≤ 6 lines).
 - **No verdict on the PR overall.**

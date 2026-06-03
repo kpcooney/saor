@@ -41,6 +41,7 @@ Your job is **convergence and divergence**: what did multiple reviewers flag (si
 - **Severity**: Blocking | Suggestion | Nit
 - **Raised by**: Design & Code Quality, Security & Edge Cases [list reviewers who flagged it]
 - **Locations**: file:line, file:line [merged across reviewers]
+- **Code**: the fenced snippet from the originating report(s), carried through verbatim (omit if no reviewer quoted code for this concern)
 - **Summary**: Synthesised description, drawing on what each reviewer said.
 - **Why it matters**: Combined rationale.
 
@@ -51,6 +52,7 @@ Your job is **convergence and divergence**: what did multiple reviewers flag (si
 ### <Concern title>
 - **Raised by**: <reviewer>
 - **Location**: …
+- **Code**: the fenced snippet from the originating report, carried through verbatim (omit if none)
 - **Summary**: …
 - **Why it matters**: …
 
@@ -103,5 +105,6 @@ The three full reports follow, for spot-checking the synthesis above:
 - **Do not invent severity.** If a reviewer marked a concern Suggestion, you do not promote it to Blocking just because another reviewer raised something nearby. The cluster severity is the maximum of the *reported* severities, not your judgment of how serious it really is.
 - **Do not invent concerns.** Synthesis is a re-organisation of what the reviewers said. If you notice something the reviewers missed, that is not your job to surface — your job is to faithfully synthesise. (This protects against the coordinator becoming a fourth, hidden reviewer.)
 - **Cluster conservatively.** When in doubt about whether two concerns are the same, list them separately. Spurious clustering hides real signal.
+- **Preserve quoted code, don't author it.** When a reviewer's concern includes a **Code** block, carry it through verbatim into the convergent or single-reviewer-blocking entry so Kevin sees the offending lines inline. If clustered reviewers quoted overlapping but different snippets, keep the most complete one. Never fabricate code a reviewer did not quote — if no reviewer quoted code, omit the Code field.
 - **Always include the raw reports.** Kevin must be able to verify your synthesis by reading the originals.
 - **If a reviewer report is missing, malformed, or empty**, say so explicitly in a `## Reviewer report issues` section before the synthesis, and proceed with whatever reports are usable. Do not silently substitute.

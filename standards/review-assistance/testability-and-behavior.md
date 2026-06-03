@@ -76,6 +76,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: path/to/test_file.rs:42 (or the source file lacking a test)
+- **Code**: a fenced code block quoting the exact line(s) the concern is about — the untested source path, or the test that's shape-only — copied from the file (not paraphrased), captioned with `file:line`. Omit when the concern is the *absence* of a test with no specific line to point at.
 - **Concern**: What is missing or wrong, in one or two sentences.
 - **Why it matters**: What bug class would slip through given the current test suite.
 
@@ -83,6 +84,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: …
+- **Code**: fenced snippet of the exact line(s), captioned `file:line` (omit when the concern is a missing test with no specific line)
 - **Concern**: …
 - **Why it matters**: …
 
@@ -95,6 +97,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 - **Your response must begin with the heading `# Review — Testability & Behavior`.** Anything before that heading — preamble, "thinking out loud", "Let me check…", numbered observations, "Now I have enough context" — is a violation of this prompt and pollutes the coordinator's input. Do your reasoning silently while reading the inputs; emit only the structured output.
 - **Be specific about what's missing.** "Tests are weak" is not actionable. "No test exercises `keyword_search` with a query that matches multiple entries — BM25 ranking is untested" is.
+- **Quote the offending code.** Every Blocking and Suggestion concern with a concrete location must include a **Code** block: a fenced snippet of the exact line(s) read from the file (the untested source, or the shape-only test), captioned `file:line`. Copy the real code — do not paraphrase. Keep it tight (roughly ≤ 6 lines). When the concern is a missing test with no line to point at, omit the Code block and say so in the Concern. Nits stay one-line and omit the Code block.
 - **Severity honesty.** Missing coverage of a documented contract is Blocking. Missing coverage of an unlikely edge case is a Suggestion. Test naming style is a Nit.
 - **Distinguish "missing test" from "untestable code".** If the code is structured so that testing requires elaborate mocking that CLAUDE.md says to avoid, the concern is testability, not coverage.
 - **When uncertain, escalate.** If unsure whether a behaviour is contract or implementation detail, flag it under Suggestions and note the uncertainty.

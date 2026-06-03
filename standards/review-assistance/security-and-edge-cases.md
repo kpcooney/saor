@@ -90,6 +90,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: path/to/file.rs:42 (or "general")
+- **Code**: a fenced code block quoting the exact line(s) the concern is about, copied from the file (not paraphrased), captioned with `file:line`. Omit for "general" concerns with no single location.
 - **Concern**: What is exploitable or broken, with the failure scenario.
 - **Why it matters**: The concrete consequence — data corruption, secret exposure, crash, etc.
 
@@ -97,6 +98,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: …
+- **Code**: fenced snippet of the exact line(s), captioned `file:line` (omit if no single location)
 - **Concern**: …
 - **Why it matters**: …
 
@@ -109,6 +111,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 - **Your response must begin with the heading `# Review — Security & Edge Cases`.** Anything before that heading — preamble, "thinking out loud", "Let me check…", numbered observations, "Now I have enough context" — is a violation of this prompt and pollutes the coordinator's input. Do your reasoning silently while reading the inputs; emit only the structured output.
 - **Concrete failure scenarios.** "This is unsafe" is not actionable. "If `request.path` contains `../`, this opens files outside the project directory" is.
+- **Quote the offending code.** Every Blocking and Suggestion concern with a concrete location must include a **Code** block: a fenced snippet of the exact line(s) read from the file, captioned `file:line`. Copy the real code — do not paraphrase. Keep it tight (roughly ≤ 6 lines, just enough to see the issue). Nits stay one-line and omit the Code block.
 - **Severity honesty.** A theoretical concern with no realistic exploit path is a Suggestion or Nit, not Blocking. A real exploit path with a concrete consequence is Blocking. Do not inflate.
 - **When uncertain, escalate.** If you suspect an issue but cannot confirm the exploit path, list it under Suggestions with "Uncertain — recommend Kevin review" and add an uncertainty flag to the Summary.
 - **No verdict.** Do not approve or block. Surface concerns and let the synthesis and the human handle it.
