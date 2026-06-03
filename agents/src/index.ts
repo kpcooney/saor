@@ -10,4 +10,43 @@
  * full agent architecture.
  */
 
-// Exports will be added as each module is implemented in Phase 1.
+// Agent identity (issue #7): the structured identity every agent carries and
+// the factory that constructs it.
+export type {
+  AgentCredential,
+  AgentIdentity,
+  AgentScope,
+  AgentType,
+  MemoryNamespaceScope,
+} from './identity/types.js';
+export {
+  createAgentIdentity,
+  DEFAULT_AGENT_TTL_MS,
+} from './identity/factory.js';
+export type {
+  AgentIdentitySpec,
+  CreateAgentIdentityOptions,
+} from './identity/factory.js';
+
+// Scope enforcement (issue #7): the PreToolUse hook that keeps an agent within
+// its declared scope.
+export {
+  createScopeEnforcementHook,
+  evaluateToolCall,
+  buildScopeViolationEvent,
+} from './hooks/scope-enforcement.js';
+export type {
+  ScopeDecision,
+  ScopeViolation,
+  ScopeEnforcementConfig,
+  PreToolUseHookCallback,
+} from './hooks/scope-enforcement.js';
+
+// Audit trail contract (defined here in issue #7; the IPC-backed logger and
+// the PostToolUse hook land in issue #10).
+export type {
+  AuditEvent,
+  AuditEventType,
+  AuditResult,
+  AuditLogger,
+} from './hooks/audit-logger.js';
