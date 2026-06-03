@@ -17,6 +17,7 @@ import {
   createScopeEnforcementHook,
   evaluateToolCall,
   fileIsInScope,
+  isCredentialExpired,
   matchesGlob,
   type ScopeViolation,
 } from '../../src/hooks/scope-enforcement.js';
@@ -376,5 +377,136 @@ describe('createScopeEnforcementHook', () => {
     expect(result).toEqual({});
     expect(logSpy).not.toHaveBeenCalled();
     expect(events).toHaveLength(0);
+  });
+
+  it('still denies a blocked call when the audit logger throws', async () => {
+    // A logging failure must not turn a denied call into an allowed one —
+    // auditing is a side effect, not a gate.
+    const throwingLogger: AuditLogger = {
+      log: async (): Promise<void> => {
+        throw new Error('audit store unavailable');
+      },
+    };
+    const hook = createScopeEnforcementHook({
+      identity: identityWith(),
+      auditLogger: throwingLogger,
+      projectId: 'proj-1',
+      now: () => NOW,
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await hook(
+      preToolUseInput('Write', { file_path: 'src-tauri/src/lib.rs' }),
+      'tool-use-1',
+      HOOK_OPTIONS,
+    );
+
+    expect(result.hookSpecificOutput).toMatchObject({
+      permissionDecision: 'deny',
+      permissionDecisionReason: 'File not in agent scope',
+    });
+    // The failure is surfaced, not swallowed.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    errorSpy.mockRestore();
+  });
+});
+
+describe('isCredentialExpired', () => {
+  it('is false when expiry is in the future', () => {
+    expect(isCredentialExpired(FUTURE, NOW)).toBe(false);
+  });
+
+  it('is true when expiry is in the past', () => {
+    expect(isCredentialExpired(PAST, NOW)).toBe(true);
+  });
+
+  it('is true at the exact expiry instant (inclusive boundary)', () => {
+    expect(isCredentialExpired(NOW.toISOString(), NOW)).toBe(true);
+  });
+
+  it('fails closed: an unparseable expiry is treated as expired', () => {
+    expect(isCredentialExpired('not-a-date', NOW)).toBe(true);
+    expect(isCredentialExpired('', NOW)).toBe(true);
+  });
+});
+
+describe('evaluateToolCall — defense-in-depth on a corrupted identity', () => {
+  // A factory-built identity can never carry an invalid expiresAt (the factory
+  // throws), but a persisted/round-tripped/hand-built one might. The hook must
+  // still fail closed. This identity is constructed directly to bypass the
+  // factory's validation.
+  const corruptedIdentity: AgentIdentity = {
+    id: 'agent:code:corrupt',
+    type: 'specialist',
+    role: 'code-agent',
+    delegatedBy: 'human:kevin',
+    delegationChain: ['human:kevin', 'agent:code:corrupt'],
+    purpose: 'test',
+    scope: {
+      issues: [],
+      files: ['agents/src/**'],
+      branches: ['main'],
+      tools: ['Read'],
+      memoryNamespaces: { read: [], write: [] },
+    },
+    standards: [],
+    createdAt: NOW.toISOString(),
+    expiresAt: 'not-a-date',
+  };
+
+  it('blocks with credential.expired when expiresAt is unparseable', () => {
+    const decision = evaluateToolCall({
+      identity: corruptedIdentity,
+      toolName: 'Read',
+      toolInput: {},
+      now: NOW,
+    });
+
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.eventType).toBe('credential.expired');
+  });
+});
+
+describe('evaluateToolCall — file scope covers all file-mutating tools', () => {
+  it('blocks an out-of-scope MultiEdit with a scope.violation', () => {
+    const decision = evaluateToolCall({
+      identity: identityWith({ tools: ['Read', 'MultiEdit'] }),
+      toolName: 'MultiEdit',
+      toolInput: { file_path: 'src-tauri/src/lib.rs' },
+      now: NOW,
+    });
+
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.eventType).toBe('scope.violation');
+    expect(decision.violation.action).toContain('MultiEdit');
+  });
+
+  it('blocks an out-of-scope NotebookEdit via its notebook_path param', () => {
+    const decision = evaluateToolCall({
+      identity: identityWith({ tools: ['Read', 'NotebookEdit'] }),
+      toolName: 'NotebookEdit',
+      toolInput: { notebook_path: 'src-tauri/notes.ipynb' },
+      now: NOW,
+    });
+
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.eventType).toBe('scope.violation');
+    expect(decision.violation.details).toMatchObject({
+      filePath: 'src-tauri/notes.ipynb',
+    });
+  });
+
+  it('allows an in-scope MultiEdit', () => {
+    const decision = evaluateToolCall({
+      identity: identityWith({ tools: ['Read', 'MultiEdit'] }),
+      toolName: 'MultiEdit',
+      toolInput: { file_path: 'agents/src/new.ts' },
+      now: NOW,
+    });
+
+    expect(decision.action).toBe('allow');
   });
 });

@@ -138,4 +138,22 @@ describe('createAgentIdentity', () => {
     expect(identity.purpose).toBe('Implement PROJ-167: agent identity');
     expect(identity.scope).toBe(BASE_SCOPE);
   });
+
+  it('throws when an explicit expiresAt is not a valid date', () => {
+    // An unparseable expiry would make the temporal security check fail open,
+    // so the factory rejects it at construction rather than letting a
+    // never-expiring identity exist.
+    expect(() => createAgentIdentity(specWith({ expiresAt: 'not-a-date' }))).toThrow(
+      TypeError,
+    );
+  });
+
+  it('accepts a valid explicit expiresAt', () => {
+    const identity = createAgentIdentity(
+      specWith({ expiresAt: '2027-01-01T00:00:00.000Z' }),
+      { now: FIXED_NOW },
+    );
+
+    expect(identity.expiresAt).toBe('2027-01-01T00:00:00.000Z');
+  });
 });

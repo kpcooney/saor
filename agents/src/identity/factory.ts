@@ -94,6 +94,15 @@ function buildDelegationChain(spec: AgentIdentitySpec, id: string): string[] {
 
 function resolveExpiresAt(spec: AgentIdentitySpec, createdAt: Date): string {
   if (spec.expiresAt !== undefined) {
+    // Reject an unparseable expiry at construction so an identity that fails
+    // the temporal security check open can never exist. The scope hook also
+    // fails closed on NaN as defense-in-depth, but catching it here turns a
+    // silent never-expiring credential into a loud programmer error.
+    if (Number.isNaN(new Date(spec.expiresAt).getTime())) {
+      throw new TypeError(
+        `createAgentIdentity: spec.expiresAt is not a valid date: "${spec.expiresAt}"`,
+      );
+    }
     return spec.expiresAt;
   }
   const ttlMs = spec.ttlMs ?? DEFAULT_AGENT_TTL_MS;

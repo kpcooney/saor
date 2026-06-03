@@ -36,8 +36,22 @@ import type {
 import type { AgentIdentity } from '../identity/types.js';
 import type { AuditEvent, AuditEventType, AuditLogger } from './audit-logger.js';
 
-/** Tools whose file target is checked against the agent's file-scope globs. */
-const FILE_MUTATING_TOOLS: readonly string[] = ['Write', 'Edit'];
+/**
+ * Tools whose file target is checked against the agent's file-scope globs.
+ *
+ * The architecture (Section 7.4) illustrates this with `["Write", "Edit"]`, but
+ * enforcement must cover *every* tool that writes a file — otherwise an agent
+ * granted a sibling editing tool could write outside its file scope unchecked.
+ * This list must track the SDK's file-mutating tool surface; when a new file
+ * writer is added to the harness, add it here (and teach `extractFilePath` its
+ * path-parameter name if it differs from `file_path`).
+ */
+const FILE_MUTATING_TOOLS: readonly string[] = [
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+];
 
 /**
  * A scope-enforcement denial. The `eventType` is one of the three security
@@ -156,7 +170,7 @@ function evaluateFileScope(
       action: 'block',
       violation: {
         eventType: 'scope.violation',
-        action: `Attempted write to ${rawPath}`,
+        action: `Attempted ${toolName} to ${rawPath}`,
         reason: 'File not in agent scope',
         details: {
           tool: toolName,
@@ -170,18 +184,39 @@ function evaluateFileScope(
   return ALLOW;
 }
 
-/** Read `file_path` from an arbitrary tool input, if present and a string. */
+/**
+ * Read the target file path from an arbitrary tool input, if present.
+ *
+ * File-mutating tools name their path parameter differently: Write/Edit/
+ * MultiEdit use `file_path`; NotebookEdit uses `notebook_path`. Only string
+ * paths are honored — a missing, non-string, or empty value yields `undefined`,
+ * which the caller treats as "no resolvable path" and blocks (fail closed).
+ */
 export function extractFilePath(toolInput: unknown): string | undefined {
   if (typeof toolInput !== 'object' || toolInput === null) {
     return undefined;
   }
-  const filePath = (toolInput as Record<string, unknown>)['file_path'];
-  return typeof filePath === 'string' && filePath.length > 0 ? filePath : undefined;
+  const record = toolInput as Record<string, unknown>;
+  const candidate = record['file_path'] ?? record['notebook_path'];
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined;
 }
 
-/** True when `expiresAt` (ISO 8601) is at or before `now`. */
+/**
+ * True when `expiresAt` (ISO 8601) is at or before `now`.
+ *
+ * Fails closed: an unparseable `expiresAt` (`NaN` from `Date` parsing) is
+ * treated as expired. Otherwise `now >= NaN` would be `false` and a malformed
+ * or corrupted expiry would make the credential read as never-expired —
+ * defeating the temporal security boundary. The factory validates `expiresAt`
+ * at construction, so this is defense-in-depth for identities that were
+ * persisted, round-tripped, or hand-built.
+ */
 export function isCredentialExpired(expiresAt: string, now: Date): boolean {
-  return now.getTime() >= new Date(expiresAt).getTime();
+  const expiry = new Date(expiresAt).getTime();
+  if (Number.isNaN(expiry)) {
+    return true;
+  }
+  return now.getTime() >= expiry;
 }
 
 /**
@@ -349,6 +384,14 @@ export function createScopeEnforcementHook(
       };
     }
 
+    const denyResult: HookJSONOutput = {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: decision.violation.reason,
+      },
+    };
+
     const event = buildScopeViolationEvent({
       violation: decision.violation,
       identity: config.identity,
@@ -357,15 +400,22 @@ export function createScopeEnforcementHook(
       id: generateEventId(),
       timestamp: now().toISOString(),
     });
-    await config.auditLogger.log(event);
 
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: decision.violation.reason,
-      },
-    };
+    // Auditing is a side effect, not a gate (CLAUDE.md principle 4). A failure
+    // to write the audit event must never turn a denied call into an allowed
+    // one, so the deny decision is computed first and returned regardless of
+    // whether logging succeeds. The failure is surfaced to stderr, not
+    // swallowed.
+    try {
+      await config.auditLogger.log(event);
+    } catch (error) {
+      console.error(
+        'scope-enforcement: failed to write audit event for a blocked tool call; denying anyway',
+        error,
+      );
+    }
+
+    return denyResult;
   };
 }
 
