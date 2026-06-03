@@ -77,6 +77,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: path/to/file.rs:42 (or "general" if architectural)
+- **Code**: a fenced code block quoting the exact line(s) the concern is about, copied from the file (not paraphrased), captioned with `file:line`. Omit for "general"/architectural concerns with no single location.
 - **Concern**: What is wrong, in one or two sentences.
 - **Why it matters**: Concrete reason this should not merge as-is.
 
@@ -87,6 +88,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 
 ### <Concern title>
 - **Location**: …
+- **Code**: fenced snippet of the exact line(s), captioned `file:line` (omit if no single location)
 - **Concern**: …
 - **Why it matters**: …
 
@@ -101,6 +103,7 @@ Produce a markdown document with this exact structure. Omit empty sections.
 - **Your response must begin with the heading `# Review — Design & Code Quality`.** Anything before that heading — preamble, "thinking out loud", "Let me check…", numbered observations, "Now I have enough context" — is a violation of this prompt and pollutes the coordinator's input. Do your reasoning silently while reading the inputs; emit only the structured output.
 - **Enumerate, don't narrate.** Do not summarise the diff. Do not write "this code does X". Surface concerns only.
 - **Be specific.** "This function is confusing" is not actionable. "`resolveScope` at scope.rs:42 mixes validation and persistence — split at the validation boundary" is.
+- **Quote the offending code.** Every Blocking and Suggestion concern with a concrete location must include a **Code** block: a fenced snippet of the exact line(s) read from the file, captioned `file:line`. Copy the real code — do not paraphrase. Keep it tight (roughly ≤ 6 lines, just enough to see the issue). Nits stay one-line and omit the Code block.
 - **Severity honesty.** Do not inflate nits to suggestions, do not downgrade real problems to nits. Match the severity to your actual confidence and concern.
 - **When uncertain, escalate.** If you cannot confidently judge a concern, surface it under Suggestions or Blocking with "Uncertain — recommend Kevin review" in the Why-it-matters line, and add it to the Summary's uncertainty flag.
 - **No verdict.** Do not say "approve" or "block". Do not recommend merging or not merging. List concerns and let the synthesis stage and the human handle it.
