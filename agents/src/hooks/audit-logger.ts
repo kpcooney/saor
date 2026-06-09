@@ -10,21 +10,36 @@
  * not generate `id` or `timestamp` — the TypeScript layer supplies a complete
  * event — so those fields are part of this contract.
  *
- * The module is split into three layers:
+ * A tool call is audited as two events recorded by two different hooks:
+ *
+ *   - `tool.invoked` (`result: 'pending'`) is emitted by a **PreToolUse** hook,
+ *     before the tool runs — so its timestamp is the real invocation time and
+ *     "pending" is literally true at that moment.
+ *   - `tool.completed` (`result: 'success' | 'failure'`) is emitted by a
+ *     **PostToolUse** / **PostToolUseFailure** hook, after the tool returns.
+ *
+ * The two events are correlated by `details.toolUseId` (the SDK's tool-use id,
+ * which both hooks receive). Emitting from two hooks — rather than synthesising
+ * both from PostToolUse — gives the pair genuinely distinct, correctly-ordered
+ * timestamps and keeps each event's `result` truthful. See ADR-006 for the
+ * decision and the blocked-call interaction with the scope-enforcement hook.
+ *
+ * The module is split into layers:
  *
  *   - The `AuditEvent` / `AuditLogger` type contract (below) — the shared
  *     vocabulary every audit producer depends on.
- *   - `buildToolAuditEvents` — pure logic that turns one observed tool call into
- *     the pair of events it should record (`tool.invoked` then `tool.completed`),
- *     with no SDK dependency. This is the unit-tested core.
- *   - `createAuditLoggerHook` — the adapter that wraps `buildToolAuditEvents` in
- *     the SDK's PostToolUse / PostToolUseFailure hook signature and writes the
- *     events through the injected AuditLogger.
+ *   - `buildToolInvokedEvent` / `buildToolCompletedEvent` — pure logic that
+ *     builds one event from a tool call, with no SDK dependency. The
+ *     unit-tested core.
+ *   - `createToolInvokedAuditHook` / `createToolCompletedAuditHook` — the
+ *     adapters that wrap the builders in the SDK hook signatures and write
+ *     through the injected AuditLogger.
  *
- * Auditing is automatic and non-optional: the hook fires after every tool call,
- * whether it succeeded or failed, and the agent has no say in whether it logs
- * (CLAUDE.md principle 4). Logging is a pure side effect — a failure to write an
- * audit event is reported to stderr but never breaks the tool flow.
+ * Auditing is automatic and non-optional: the hooks fire on every tool call,
+ * whatever the outcome, and the agent has no say in whether it logs (CLAUDE.md
+ * principle 4). Logging is a pure side effect — a failure to write an audit
+ * event is reported to stderr but never breaks the tool flow, and the hooks
+ * never alter the tool's permission decision or output.
  *
  * The concrete AuditLogger implementation that transports events to the Rust
  * store over Tauri IPC is provided separately; this module depends only on the
@@ -32,7 +47,7 @@
  *
  * See docs/architecture/sdlc-agent-architecture-research-v4.md Section 8
  * for the audit trail design, Section 8.2 for the event schema, and Section 8.5
- * for how the PostToolUse hook integrates as an automatic audit source.
+ * for how these hooks integrate as automatic audit sources.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -42,6 +57,7 @@ import type {
   HookJSONOutput,
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
+  PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 
 import type { AgentIdentity } from '../identity/types.js';
@@ -151,92 +167,91 @@ export type ToolOutcome =
   | { readonly result: 'success'; readonly response: unknown }
   | { readonly result: 'failure'; readonly reason: string };
 
-/** Inputs needed to turn one observed tool call into its pair of audit events. */
-export interface BuildToolAuditEventsInput {
-  /** Name of the tool that was invoked, e.g. "Write". */
+/**
+ * The fields common to a tool call's `tool.invoked` and `tool.completed`
+ * events. The two events are built by separate hooks at separate times, so each
+ * carries its own `eventId` and `timestamp`; everything else is shared, and
+ * `toolUseId` is the correlation key that ties the pair together.
+ */
+export interface ToolEventInput {
+  /** Name of the tool, e.g. "Write". */
   readonly toolName: string;
-  /** The raw tool input/parameters, recorded as the invocation's details. */
+  /** The raw tool input/parameters, recorded into the event's details. */
   readonly toolInput: unknown;
-  /** Whether the call succeeded or failed. */
-  readonly outcome: ToolOutcome;
   /** The agent whose action is being audited. */
   readonly identity: AgentIdentity;
-  /** Project id stamped onto both events. */
+  /** Project id stamped onto the event. */
   readonly projectId: string;
   /** Claude SDK session id, for grouping events from the same session. */
   readonly sessionId: string;
-  /** Issue reference to stamp on both events, when one applies. */
-  readonly issueRef?: string;
-  /** Event id for the `tool.invoked` event. */
-  readonly invokedEventId: string;
-  /** Event id for the `tool.completed` event. */
-  readonly completedEventId: string;
   /**
-   * Timestamp (ISO 8601) for both events. The PostToolUse hook observes the
-   * call at a single point — after it returns — so the invocation and
-   * completion are stamped with the same instant.
+   * The SDK tool-use id. Both the PreToolUse and PostToolUse hooks receive it,
+   * so it is the correlation key that pairs a `tool.invoked` event with its
+   * later `tool.completed` (or `tool.blocked`) event.
    */
+  readonly toolUseId: string;
+  /** Issue reference to stamp on the event, when one applies. */
+  readonly issueRef?: string;
+  /** Event id (UUID v4). */
+  readonly eventId: string;
+  /** ISO 8601 timestamp of when this event was observed. */
   readonly timestamp: string;
 }
 
-/**
- * Build the pair of audit events recorded for one tool call: a `tool.invoked`
- * event capturing the invocation and its parameters, followed by a
- * `tool.completed` event capturing the outcome.
- *
- * Pure and deterministic — the caller supplies the event ids and timestamp — so
- * the events can be asserted exactly in tests. The returned tuple is in audit
- * order: `[invoked, completed]`.
- *
- * The `tool.invoked` event has `result: 'pending'`: at invocation time the
- * outcome is not yet known, and the matching `tool.completed` event carries the
- * actual success/failure. Both events share the same details (the tool name and
- * its parameters) so either can be read in isolation.
- */
-export function buildToolAuditEvents(
-  input: BuildToolAuditEventsInput,
-): readonly [AuditEvent, AuditEvent] {
-  const { identity, toolName, outcome } = input;
-  const parameters = normalizeToolParameters(input.toolInput);
+/** Inputs for a `tool.completed` event: the common fields plus the outcome. */
+export interface ToolCompletedEventInput extends ToolEventInput {
+  /** Whether the call succeeded or failed. */
+  readonly outcome: ToolOutcome;
+}
 
-  const base = {
+/**
+ * Build the fields shared by both tool events. Pure; the caller supplies the
+ * event id and timestamp so the result is fully deterministic and testable.
+ */
+function buildToolEventBase(input: ToolEventInput): Omit<AuditEvent, 'eventType' | 'result'> {
+  return {
+    id: input.eventId,
     timestamp: input.timestamp,
     projectId: input.projectId,
-    agentId: identity.id,
-    agentRole: identity.role,
-    delegationChain: identity.delegationChain,
-    action: toolName,
+    agentId: input.identity.id,
+    agentRole: input.identity.role,
+    delegationChain: input.identity.delegationChain,
+    action: input.toolName,
+    details: {
+      tool: input.toolName,
+      parameters: normalizeToolParameters(input.toolInput),
+      toolUseId: input.toolUseId,
+    },
     sessionId: input.sessionId,
     ...(input.issueRef !== undefined ? { issueRef: input.issueRef } : {}),
-  } as const;
+  };
+}
 
-  const invoked: AuditEvent = {
-    ...base,
-    id: input.invokedEventId,
+/**
+ * Build the `tool.invoked` event recorded before a tool runs. `result` is
+ * `'pending'`: emitted from the PreToolUse hook, the outcome genuinely is not
+ * yet known, and a later `tool.completed` (or `tool.blocked`) event with the
+ * same `details.toolUseId` records the resolution.
+ */
+export function buildToolInvokedEvent(input: ToolEventInput): AuditEvent {
+  return {
+    ...buildToolEventBase(input),
     eventType: 'tool.invoked',
-    details: { tool: toolName, parameters },
     result: 'pending',
   };
+}
 
-  const completed: AuditEvent =
-    outcome.result === 'success'
-      ? {
-          ...base,
-          id: input.completedEventId,
-          eventType: 'tool.completed',
-          details: { tool: toolName, parameters },
-          result: 'success',
-        }
-      : {
-          ...base,
-          id: input.completedEventId,
-          eventType: 'tool.completed',
-          details: { tool: toolName, parameters },
-          result: 'failure',
-          reason: outcome.reason,
-        };
-
-  return [invoked, completed];
+/**
+ * Build the `tool.completed` event recorded after a tool returns, carrying the
+ * outcome. On failure, `reason` holds the error message so the audit trail
+ * explains what went wrong.
+ */
+export function buildToolCompletedEvent(input: ToolCompletedEventInput): AuditEvent {
+  const base = { ...buildToolEventBase(input), eventType: 'tool.completed' as const };
+  if (input.outcome.result === 'success') {
+    return { ...base, result: 'success' };
+  }
+  return { ...base, result: 'failure', reason: input.outcome.reason };
 }
 
 /**
@@ -276,6 +291,13 @@ export function resolveIssueRef(
  * `is_error`/`isError` rather than throwing — those would otherwise reach the
  * PostToolUse (success) hook. When such a flag is set, returns a human-readable
  * error message; otherwise returns `undefined` (a genuine success).
+ *
+ * The message is read from `error` then `message` only. `content` is
+ * deliberately not consulted: in an MCP response `content` is the (successful)
+ * result payload, not an error string — and it is typically an array of content
+ * blocks rather than a string — so using it as the failure reason is both
+ * semantically wrong and rarely a string. When neither key holds a non-empty
+ * string, a generic message is used.
  */
 export function detectToolResponseFailure(toolResponse: unknown): string | undefined {
   if (typeof toolResponse !== 'object' || toolResponse === null) {
@@ -286,7 +308,7 @@ export function detectToolResponseFailure(toolResponse: unknown): string | undef
   if (!flagged) {
     return undefined;
   }
-  const message = record['error'] ?? record['message'] ?? record['content'];
+  const message = record['error'] ?? record['message'];
   if (typeof message === 'string' && message.length > 0) {
     return message;
   }
@@ -294,10 +316,10 @@ export function detectToolResponseFailure(toolResponse: unknown): string | undef
 }
 
 /**
- * Configuration for {@link createAuditLoggerHook}. The identity and audit
- * logger are required; the rest are injectable for deterministic tests.
+ * Configuration shared by the two audit hooks. The identity and audit logger
+ * are required; the rest are injectable for deterministic tests.
  */
-export interface AuditLoggerConfig {
+export interface AuditHookConfig {
   /** The identity whose actions are audited. */
   readonly identity: AgentIdentity;
   /** Where audit events are written. */
@@ -316,78 +338,116 @@ export interface AuditLoggerConfig {
 }
 
 /**
- * The SDK PostToolUse hook callback signature, expressed in terms of the
- * exported SDK types. Aliased here because the SDK does not re-export its
- * internal `HookCallback` name. The same callback shape serves the PostToolUse
- * and PostToolUseFailure events this hook registers against.
+ * The SDK hook callback signature, expressed in terms of the exported SDK
+ * types. Aliased here because the SDK does not re-export its internal
+ * `HookCallback` name. The same shape serves both audit hooks.
  */
-export type PostToolUseHookCallback = (
+export type AuditHookCallback = (
   input: HookInput,
   toolUseId: string | undefined,
   options: { signal: AbortSignal },
 ) => Promise<HookJSONOutput>;
 
 /**
- * Build the PostToolUse hook that records every tool call in the audit trail.
+ * Build the **PreToolUse** hook that records a `tool.invoked` event before a
+ * tool runs. Registered for the "*" matcher (all tools).
  *
- * The returned callback is registered against both the `PostToolUse` (success)
- * and `PostToolUseFailure` (error) events for the "*" matcher (all tools), so
- * it fires regardless of outcome. Each firing emits two events — `tool.invoked`
- * then `tool.completed` — via the injected AuditLogger.
- *
- * Auditing is a side effect, never a gate: a PostToolUse hook cannot undo a
- * tool call that already ran, and a failure to write the audit events is logged
- * to stderr rather than thrown. The hook always returns an empty result so it
- * never alters the tool's output or the conversation flow.
+ * The hook always returns an empty result, expressing no permission opinion —
+ * scope enforcement is a separate PreToolUse hook, and auditing must never
+ * affect whether a call is allowed. If a sibling hook then blocks the call, the
+ * tool never runs and no `tool.completed` follows; the scope-enforcement hook's
+ * `tool.blocked` event (same `details.toolUseId`) records the resolution
+ * instead. See ADR-006.
  */
-export function createAuditLoggerHook(
-  config: AuditLoggerConfig,
-): PostToolUseHookCallback {
+export function createToolInvokedAuditHook(config: AuditHookConfig): AuditHookCallback {
   const now = config.now ?? (() => new Date());
   const generateEventId = config.generateEventId ?? (() => randomUUID());
 
-  return async function logToolCall(input: HookInput): Promise<HookJSONOutput> {
+  return async function logToolInvoked(input: HookInput): Promise<HookJSONOutput> {
+    if (input.hook_event_name !== 'PreToolUse') {
+      // Registered for PreToolUse; ignore anything else.
+      return {};
+    }
+    const preToolUse = input as PreToolUseHookInput;
+
+    const event = buildToolInvokedEvent({
+      toolName: preToolUse.tool_name,
+      toolInput: preToolUse.tool_input,
+      identity: config.identity,
+      projectId: config.projectId,
+      sessionId: preToolUse.session_id,
+      toolUseId: preToolUse.tool_use_id,
+      issueRef: resolveIssueRef(config.identity, config.issueRef),
+      eventId: generateEventId(),
+      timestamp: now().toISOString(),
+    });
+
+    await writeAuditEvent(config.auditLogger, event);
+    return {};
+  };
+}
+
+/**
+ * Build the **PostToolUse** / **PostToolUseFailure** hook that records a
+ * `tool.completed` event after a tool returns. Registered for the "*" matcher
+ * against both events, so it fires whether the call succeeded or failed.
+ *
+ * Auditing is a side effect, never a gate: a PostToolUse hook cannot undo a
+ * tool call that already ran, and a failure to write the event is logged to
+ * stderr rather than thrown. The hook always returns an empty result so it
+ * never alters the tool's output or the conversation flow.
+ */
+export function createToolCompletedAuditHook(config: AuditHookConfig): AuditHookCallback {
+  const now = config.now ?? (() => new Date());
+  const generateEventId = config.generateEventId ?? (() => randomUUID());
+
+  return async function logToolCompleted(input: HookInput): Promise<HookJSONOutput> {
     const outcome = outcomeFromHookInput(input);
     if (outcome === undefined) {
       // Registered for PostToolUse / PostToolUseFailure; ignore anything else.
       return {};
     }
-
     const toolCall = input as PostToolUseHookInput | PostToolUseFailureHookInput;
-    const events = buildToolAuditEvents({
+
+    const event = buildToolCompletedEvent({
       toolName: toolCall.tool_name,
       toolInput: toolCall.tool_input,
       outcome,
       identity: config.identity,
       projectId: config.projectId,
       sessionId: toolCall.session_id,
+      toolUseId: toolCall.tool_use_id,
       issueRef: resolveIssueRef(config.identity, config.issueRef),
-      invokedEventId: generateEventId(),
-      completedEventId: generateEventId(),
+      eventId: generateEventId(),
       timestamp: now().toISOString(),
     });
 
-    // Write in audit order (invoked, then completed). A logging failure is
-    // surfaced to stderr but never propagated — the tool has already run, and
-    // auditing must not break the tool flow (CLAUDE.md principle 4).
-    try {
-      for (const event of events) {
-        await config.auditLogger.log(event);
-      }
-    } catch (error) {
-      console.error(
-        'audit-logger: failed to write audit event(s) for a tool call; continuing',
-        error,
-      );
-    }
-
+    await writeAuditEvent(config.auditLogger, event);
     return {};
   };
 }
 
 /**
+ * Write a single audit event, swallowing any logger failure. Auditing is a side
+ * effect, not a gate (CLAUDE.md principle 4): a failed write must never break
+ * the tool flow, so the error is surfaced to stderr and not propagated. Each
+ * event is written independently — there is no multi-event batch to leave
+ * half-written.
+ */
+async function writeAuditEvent(logger: AuditLogger, event: AuditEvent): Promise<void> {
+  try {
+    await logger.log(event);
+  } catch (error) {
+    console.error(
+      `audit-logger: failed to write ${event.eventType} event for a tool call; continuing`,
+      error,
+    );
+  }
+}
+
+/**
  * Derive the tool outcome from a hook input, or `undefined` if the event is not
- * one this hook audits.
+ * one the completion hook audits.
  *
  *   - `PostToolUseFailure` → failure, with the SDK-supplied error message.
  *   - `PostToolUse` → success, unless the response carries an in-band error
