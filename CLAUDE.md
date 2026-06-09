@@ -105,7 +105,7 @@ Examples: `12/sqlite-memory-store`, `15/jsonl-audit-writer`, `18/code-agent-iden
 2. **Create a feature branch** from `main` using the naming convention above.
 3. **Implement on the branch.** Commit early and often using Conventional Commits. Each commit should be a coherent unit — not a single massive commit at the end.
 4. **Write tests** alongside the implementation (see Testing section below).
-5. **Open a pull request on GitHub** when the work is ready for review. The PR description must follow the PR format standard (`standards/documentation-standards/pr-format.md`): summary, changes made, testing performed, traceability references (Issue, Epic if applicable, related ADRs), and any open questions.
+5. **Open a pull request on GitHub** when the work is ready for review. The PR description must follow the PR format standard (`standards/documentation-standards/pr-format.md`): summary, changes made, testing performed, traceability references (Issue, Epic if applicable, related ADRs), and any open questions. The PR must be green on the full suite and the mutation score (see Testing — Acceptance tier) before requesting review.
 6. **Review loop.** Kevin will review the PR on GitHub. This is a conversation, not a rubber stamp. The loop works like this:
 
    a. **Kevin leaves review comments** — questions, critiques, change requests, or approvals on specific lines or the PR as a whole.
@@ -189,6 +189,16 @@ Documentation should help someone not familiar with the codebase understand what
 ### Testing
 
 Tests are required for all non-trivial functionality. They go through PR review alongside the implementation — not as a separate afterthought.
+
+#### Acceptance tier and where review-truth comes from
+
+Kevin cannot line-by-line review across Rust, Svelte, and TypeScript. The authoritative signal that an issue is done is therefore neither Kevin reading the diff nor the agent's own summary of its work — it is machine-checked behavior plus mutation score. See [ADR-007](docs/adr/007-review-truth-model.md).
+
+- **Acceptance tier**: a tagged test tier, separate from unit tests. Each acceptance test maps to a GitHub issue and is the executable definition of done for it. Acceptance tests use real stores (temp-dir files, in-memory SQLite) and verify side effects by reading them back — no mocks at this tier. Each includes a **negative control**, so a green result can't be green for the wrong reason.
+- **Mutation testing** runs on the load-bearing modules (identity/scope, audit, reference resolver, memory store, standards resolution). Mutation score — not coverage — measures whether the tests would actually catch a regression.
+- **PRs are gated** on the full suite and the mutation score being green before they reach Kevin.
+- **The PR summary and any agent self-review are orientation only.** They tell Kevin where to look; they do not close the issue. The green acceptance run, and where applicable the behavior Kevin observes, are what close it.
+- **Capabilities that touch the live Claude Agent SDK** (hook registration actually firing, a tool actually halted) get a small one-time human-observable integration check in addition to their machine-verifiable acceptance test.
 
 **Testing philosophy for Phase 1:**
 
