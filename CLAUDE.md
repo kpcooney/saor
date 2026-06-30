@@ -1,5 +1,10 @@
 # CLAUDE.md — Saor Project Instructions
 
+This file is the always-loaded **map** for working on Saor. It holds the foundational context and
+the project's hard rules, and it anchors out to the documents that own each detail. When a section
+here points to a standard or ADR, that linked document is authoritative — read it before acting in
+that area.
+
 ## What Is Saor
 
 Saor is an AI-powered SDLC orchestration platform. It coordinates specialist agents through the full software development lifecycle — requirements, UX, architecture, implementation, testing, deployment — using scoped agent identities, a shared memory layer, a reference-based handoff protocol, and a full audit trail.
@@ -38,260 +43,47 @@ standards/          System default standards files (three-tier base layer)
 docs/               Architecture docs, ADRs, project documentation
 ```
 
-**About `src-tauri/`**: This is Tauri's standard convention — it's where all the Rust code lives that plugs into the Tauri framework. Created by `cargo tauri init`. It contains the app entry point, Tauri configuration, and all the Rust modules we write for storage (memory store, audit store), process management (spawning and monitoring agent subprocesses), and IPC command handlers. "IPC" stands for inter-process communication — it's how the Svelte frontend talks to the Rust backend. The frontend calls Tauri's `invoke("some_command")` function, which crosses the process boundary into Rust and returns a result. Think of it as the bridge between the UI and the backend.
+**About `src-tauri/`**: Tauri's standard convention — where the Rust code that plugs into the Tauri framework lives (app entry point, config, and our modules for storage, process management, and IPC). "IPC" is inter-process communication: the Svelte frontend calls Tauri's `invoke("some_command")`, which crosses into Rust and returns a result. It's the bridge between the UI and the backend. See [src-tauri/README.md](src-tauri/README.md).
 
-**About `agents/`**: This is a separate TypeScript package from `src/`. It doesn't run in the browser — it runs in its own process space via Tauri's sidecar mechanism. The Claude Agent SDK spawns CLI subprocesses, so the agent layer needs to be a standalone Node.js package, not bundled into the Svelte frontend.
+**About `agents/`**: A separate TypeScript package from `src/`. It runs in its own process space via Tauri's sidecar mechanism, not in the browser — the Claude Agent SDK spawns CLI subprocesses, so the agent layer is a standalone Node.js package. See [agents/README.md](agents/README.md).
 
-**README convention**: Every top-level directory and significant subdirectory should have a `README.md` explaining what lives there, how it fits into the system, and any conventions specific to that directory. These READMEs are the first thing a new reader (human or agent) encounters when navigating the project. Keep them concise — a paragraph or two of orientation, not a full design document.
+**README convention**: Every top-level directory and significant subdirectory has a `README.md` explaining what lives there, how it fits the system, and any local conventions. Keep them concise — a paragraph or two of orientation, not a full design document.
 
-## Allowed Tools
+## How We Work
 
-These commands can be run without asking for approval. The PR workflow is the quality gate — local work should flow without prompt-by-prompt permission.
+**Permissions.** Local development flows without prompt-by-prompt approval; the PR review gate is the quality boundary. What's allowed without asking vs. what needs explicit approval is defined in [standards/process-standards/local-permissions.md](standards/process-standards/local-permissions.md). The runtime allowlist is [`.claude/settings.local.json`](.claude/settings.local.json). Two rules worth stating up front: **never push directly to `main`** (Kevin merges via PR), and **do not modify this `CLAUDE.md` without explicit approval**.
 
-**Note on security model**: These permissions are behavioral guidelines that Claude Code follows as instructions. They are not a runtime sandbox. The actual security boundaries are: GitHub branch protection on `main`, and Kevin reviewing every PR before merge. These permissions reduce friction for local development work — the PR review gate prevents bad code from reaching `main`.
+**Development workflow.** Work happens on feature branches reviewed via GitHub PRs — this is the primary autonomy model, not prompt-by-prompt approval. Branch naming is `{issue-number}/{short-description}` off `main`; every branch ties to a GitHub issue. Commit early and often with [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): description`; scopes: `tauri`, `frontend`, `agents`, `memory`, `audit`, `standards`, `mcp`). The full cycle, what you can do autonomously, and how to respond to review comments (Justify / Adjust / Clarify — and **never resolve Kevin's comments yourself**) are in [standards/process-standards/git-workflow.md](standards/process-standards/git-workflow.md).
 
-**Git (non-destructive, feature branches only):**
-- `git add`, `git commit`
-- `git push`, `git push -u origin` — **only to feature branches**, never directly to `main`
-- `git branch`, `git checkout`, `git switch`
-- `git status`, `git log`, `git diff`, `git fetch`, `git pull`
-- `git stash`, `git stash pop`
+**Review assistance.** `/review-branch [branch|PR]` spawns three blind reviewer subagents plus a coordinator; `--review-fixes` re-reviews after fixes. The agents are advisory — Kevin remains the merge gate. See [ADR-004](docs/adr/004-review-assistance-protocol.md), [ADR-005](docs/adr/005-targeted-re-review-pattern.md), the command at [.claude/commands/review-branch.md](.claude/commands/review-branch.md), and the prompts in [standards/review-assistance/](standards/review-assistance/).
 
-**Build and test:**
-- `npm install`, `npm ci` (in `agents/` or root) — note: this executes postinstall scripts from dependencies; mitigated by package.json changes going through PR review
-- `npm test`, `npm run build`, `npm run dev` (in `agents/` or root)
-- `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt` (in `src-tauri/`)
-- `npx vitest` — only `vitest`; do not run arbitrary packages via `npx`
+**Architectural decisions.** If you hit a design question the architecture doc doesn't cover, don't just pick an answer — if the decision would be hard to reverse, or a future reader would wonder "why did they do it this way?", write an ADR; otherwise ask. ADRs use the MADR template ([adr-format.md](standards/documentation-standards/adr-format.md)) and go through the normal PR workflow. When a PR implements or finalizes an ADR, flip that ADR's status to `accepted` in the same PR.
 
-**File operations:**
-- Read, write, edit, create, delete files within the project directory
-- Create directories
-- **Exception**: Do not modify `CLAUDE.md` without explicit approval — it defines the project's operating rules and permission boundaries
+## Code Standards
 
-**Do NOT run without explicit approval:**
-- `git push --force`, `git push --force-with-lease` — destructive, can lose review history
-- `git reset --hard` — discards uncommitted work
-- `git push` directly to `main` — Kevin merges via GitHub PR
-- `git merge` into `main`
-- Modifying `CLAUDE.md`
-- Any command that deploys, publishes, or releases
-- `rm -rf` or bulk deletions outside of normal file editing
-- Running arbitrary packages via `npx` (only whitelisted tools above)
-- Any shell command that installs system-level packages or modifies system configuration
+Favor readable code over clever code, and document where it adds value. The cross-cutting rules live in [code-clarity.md](standards/coding-standards/code-clarity.md) and [code-documentation-format.md](standards/documentation-standards/code-documentation-format.md). Language specifics:
 
-## Conventions
+- **Rust**: standard `rustfmt` / `clippy`. Minimal surface — storage, process management, IPC only. See [rust.md](standards/coding-standards/rust.md).
+- **TypeScript**: strict mode, ESLint + Prettier, interfaces over type aliases for public contracts. See [typescript.md](standards/coding-standards/typescript.md).
+- **Svelte**: Svelte 5 runes (`$state`, `$derived`, `$effect`); prefer stores for shared state; keep components small (~150 lines max).
 
-### Commits
-Use [Conventional Commits](https://www.conventionalcommits.org/) format: `type(scope): description`
+## Testing & Review-Truth
 
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`
-Scopes: `tauri`, `frontend`, `agents`, `memory`, `audit`, `standards`, `mcp`
+Tests are required for all non-trivial functionality and are reviewed alongside the implementation. What to test directly (real stores, no mocks), what to test with mocks, what not to unit-test, plus naming and location conventions are in [testing-requirements.md](standards/process-standards/testing-requirements.md).
 
-Examples:
-- `feat(memory): implement SQLite memory store with FTS5`
-- `docs(architecture): add ADR-001 audit store scoping`
-- `chore(build): configure Tauri sidecar for agent SDK`
-
-### Development Workflow
-
-Work happens on feature branches, reviewed via GitHub pull requests. This is the primary autonomy model — you do not need prompt-by-prompt approval for implementation work. Instead, work independently on a branch and open a PR for review.
-
-**Branch naming**: `{issue-number}/{short-description}` off `main`. The issue number ties the branch directly to its GitHub issue for traceability.
-Examples: `12/sqlite-memory-store`, `15/jsonl-audit-writer`, `18/code-agent-identity`
-
-**The workflow:**
-
-1. **Pick up a task** from the current phase scope. If the task doesn't have a GitHub issue yet, create one first.
-2. **Create a feature branch** from `main` using the naming convention above.
-3. **Implement on the branch.** Commit early and often using Conventional Commits. Each commit should be a coherent unit — not a single massive commit at the end.
-4. **Write tests** alongside the implementation (see Testing section below).
-5. **Open a pull request on GitHub** when the work is ready for review. The PR description must follow the PR format standard (`standards/documentation-standards/pr-format.md`): summary, changes made, testing performed, traceability references (Issue, Epic if applicable, related ADRs), and any open questions. The PR must be green on the full suite and the mutation score (see Testing — Acceptance tier) before requesting review.
-6. **Review loop.** Kevin will review the PR on GitHub. This is a conversation, not a rubber stamp. The loop works like this:
-
-   a. **Kevin leaves review comments** — questions, critiques, change requests, or approvals on specific lines or the PR as a whole.
-
-   b. **You respond to each comment.** You have three options:
-      - **Justify**: If you believe the current approach is correct, reply on the comment thread explaining your reasoning. Be specific — reference architecture decisions, tradeoffs, or constraints that informed the choice. Kevin may accept the justification or push back further.
-      - **Adjust**: If the feedback is valid, make the change. Push a new commit to the branch (do not force-push or squash — the commit history should show what changed in response to which feedback). Reply on the comment thread noting what you changed and in which commit.
-      - **Clarify**: If the comment is ambiguous or you need more context to act on it, ask a clarifying question on the thread.
-
-   c. **Kevin re-reviews.** After you've responded to all comments, Kevin looks again. This may produce another round of comments. The loop continues until Kevin is satisfied.
-
-   d. **Kevin approves and merges.** Do not merge your own PRs. Do not resolve Kevin's review comments — let Kevin resolve them after reviewing your response. Only Kevin marks conversations as resolved.
-
-**What you can do without asking:**
-- Create feature branches and push commits
-- Create GitHub issues for tasks within the current phase scope
-- Open pull requests
-- Respond to review comments with code changes or justifications
-- Create ADRs for design decisions (these still go through PR review)
-
-**What requires discussion first:**
-- Anything that changes the architecture document or core design principles
-- Scope changes (adding or removing Phase 1 deliverables)
-- Introducing new dependencies not implied by the architecture
-
-### Review Assistance Protocol
-
-To accelerate PR review without compromising the merge gate, the project uses a Claude-Code-orchestrated reviewer protocol — three blind reviewer agents plus a coordinator — for both initial review ([ADR-004](docs/adr/004-review-assistance-protocol.md)) and post-fix re-review ([ADR-005](docs/adr/005-targeted-re-review-pattern.md)). The reviewer agents are **advisory** — Kevin remains the merge gate, and the agents never recommend "approve" or "block".
-
-**Slash command**: `/review-branch` is the single entry point for both modes. It is defined at `.claude/commands/review-branch.md`.
-
-- **Initial review** (default): `/review-branch [branch-name | PR-number]`. Spawns three blind reviewer subagents in parallel — Design & Code Quality, Security & Edge Cases, Testability & Behavior — each with the prompt from `standards/review-assistance/`. A coordinator subagent then synthesises the reports into convergence (concerns flagged by 2+ reviewers, listed first), single-reviewer concerns, explicit disagreements, and a "suspicious unanimity" flag if the diff exceeds 200 lines and all three reviewers reported zero concerns. The run's reports + synthesis are persisted to `.claude/review-state/<branch>/<timestamp>/` for use by the post-fix re-review.
-
-- **Re-review** (post-fix verification): `/review-branch --review-fixes [branch-name | PR-number]`. Reads the most recent prior run for the branch, computes the diff of the fix (`<prior-commit>..HEAD`), and spawns three blind re-reviewer subagents — each receives **only its own prior concerns** plus the fix diff. Each re-reviewer emits a per-concern verdict (`Addressed` / `Partially addressed` / `Not addressed` / `No longer applicable`) with evidence cited from the fix diff, plus a section flagging new concerns the fix itself introduced. A re-coordinator synthesises verdicts across reviewers, surfacing outstanding work and any new convergent concerns. Kevin still decides whether the loop is closed — the re-coordinator never says "ship it" or "iterate".
-
-**When to invoke**: initial review when about to review a PR or just after pushing new commits to a feature branch. Re-review after applying fixes in response to a prior run.
-
-**Output**: in both modes, the coordinator's structured synthesis with the three raw reviewer reports appended for spot-checking. Kevin reads the synthesis alongside the diff and decides what to do. The agents do not gate merge in any automated way — there is no CI workflow, no required status check, no branch protection change.
-
-**State on disk**: `.claude/review-state/<branch>/<timestamp>/` (gitignored, per-developer, regenerable). Each run writes the three reviewer reports, the coordinator synthesis, and `meta.json` (branch, commit SHA, timestamp, run mode). Pruned to the 5 most recent runs per branch — older runs are deleted automatically after each new run.
-
-**Where prompts live**: `standards/review-assistance/` (initial reviewer prompts plus the `re-review-*.md` variants for post-fix verification). Updates to reviewer behaviour go through the normal PR workflow — a prompt change is a behaviour change and warrants the same review attention as a code change.
-
-**Migration path**: when the agent harness lands (issues #7 and #11), the reviewer and re-reviewer prompts are read directly by the harness via the `standards://review-assistance/<role>` URI scheme without modification. Only the spawning mechanism changes.
-
-### Architectural Decisions
-If you encounter a design question not covered by the architecture document, **do not just pick an answer and keep going**. If in doubt about the right direction, prompt for feedback — it's better to ask than to build on the wrong assumption. If the decision is significant enough to affect future work, write an ADR in `docs/adr/` using the MADR template from `standards/documentation-standards/adr-format.md`. ADRs go through the same PR workflow — branch, write, open PR for review.
-
-The threshold for "write an ADR" vs. "just ask": if the decision would be hard to reverse later, or if a future reader would wonder "why did they do it this way?", it warrants an ADR.
-
-### Code Style
-- **Rust**: Follow standard `rustfmt` and `clippy` conventions. Minimal surface — Rust handles storage, process management, and IPC (inter-process communication with the frontend) only.
-- **TypeScript**: Strict mode. ESLint + Prettier. Prefer interfaces over type aliases for public contracts.
-- **Svelte**: Use Svelte 5 runes syntax (`$state`, `$derived`, `$effect`). Prefer Svelte stores for shared state. Components should be small and focused — if a component file exceeds ~150 lines, consider splitting it.
-
-### Code Clarity
-
-Favor readable code over clever or terse code. Someone unfamiliar with the project should be able to read a module and understand what it does without having to reverse-engineer intent from compressed logic.
-
-- **Name things for what they mean**, not for brevity. `resolveStandardWithOverrideChain` is better than `resolve`. A variable called `agentDelegationChain` is better than `chain`.
-- **Avoid unnecessary abstraction.** Don't introduce a factory or strategy pattern where a plain function works. The architecture already has enough abstraction layers — the code within each layer should be straightforward.
-- **Break up complex logic.** If a function is doing five things, split it into named steps. Each step's name should explain the intent.
-- **Use early returns** to reduce nesting. Guard clauses at the top of a function, happy path at the bottom.
-
-### Code Documentation
-
-Documentation should help someone not familiar with the codebase understand what they're looking at. It does not need to be on every function or every line — use judgment about where it adds value.
-
-**Always document:**
-- Module-level: every file should have a brief comment (or doc comment) at the top explaining what this module is responsible for and where it fits in the system. Link to the relevant architecture doc section when applicable (e.g., `// See docs/architecture/...v3.md Section 6 for memory architecture`).
-- Public interfaces and types: describe the contract, not the implementation. For TypeScript interfaces that agents or MCP servers consume, explain what each field means and when it's used.
-- Non-obvious decisions: if you chose approach A over approach B for a reason, leave a comment explaining why. Future readers (including future agent sessions) will benefit from knowing the rationale.
-- Complex algorithms or data transformations: if the logic isn't self-evident from reading the code, explain the approach.
-
-**Don't document:**
-- Self-evident code. `// increment counter` above `counter++` adds nothing.
-- Every private helper function. If the name and signature make the purpose clear, that's sufficient.
-
-**Linking to deeper docs:** When a module implements something described in the architecture document or an ADR, reference it. This creates traceability between the running code and the design decisions that shaped it.
-
-### Testing
-
-Tests are required for all non-trivial functionality. They go through PR review alongside the implementation — not as a separate afterthought.
-
-#### Acceptance tier and where review-truth comes from
-
-Kevin cannot line-by-line review across Rust, Svelte, and TypeScript. The authoritative signal that an issue is done is therefore neither Kevin reading the diff nor the agent's own summary of its work — it is machine-checked behavior plus mutation score. See [ADR-007](docs/adr/007-review-truth-model.md).
-
-- **Acceptance tier**: a tagged test tier, separate from unit tests. Each acceptance test maps to a GitHub issue and is the executable definition of done for it. Acceptance tests use real stores (temp-dir files, in-memory SQLite) and verify side effects by reading them back — no mocks at this tier. Each includes a **negative control**, so a green result can't be green for the wrong reason.
-- **Mutation testing** runs on the load-bearing modules (identity/scope, audit, reference resolver, memory store, standards resolution). Mutation score — not coverage — measures whether the tests would actually catch a regression.
-- **PRs are gated** on the full suite and the mutation score being green before they reach Kevin.
-- **The PR summary and any agent self-review are orientation only.** They tell Kevin where to look; they do not close the issue. The green acceptance run, and where applicable the behavior Kevin observes, are what close it.
-- **Capabilities that touch the live Claude Agent SDK** (hook registration actually firing, a tool actually halted) get a small one-time human-observable integration check in addition to their machine-verifiable acceptance test.
-
-**Testing philosophy for Phase 1:**
-
-This project has a challenge: much of the interesting behavior involves the Claude Agent SDK, which means real agent calls, context windows, and LLM responses. You cannot meaningfully test that in unit tests. Acknowledge this and test what you *can* test well.
-
-**What to test directly (real logic, no mocks):**
-- **Memory store**: SQLite operations, FTS5 search, schema migrations. These are pure data operations — write an entry, search for it, verify results. Use a real in-memory SQLite database, not mocks.
-- **Audit store**: JSONL append and read-back. Write events, read them back, verify structure and ordering.
-- **Reference resolver**: URI parsing and routing. Given a `standards://coding-standards/typescript` URI, verify it resolves through the three-tier override chain correctly. Given a `file://` URI, verify it reads the right file. Use real files in a temp directory.
-- **Identity and scope validation**: Given an agent identity with specific file globs and tool allowlists, verify that scope checks pass and fail correctly. This is pure logic — no SDK dependency.
-- **Standards resolution**: Three-tier override chain. System default exists, project override exists, verify the override wins. No override, verify the default is returned.
-
-**What to test with mocks:**
-- **Hook behavior**: The PreToolUse and PostToolUse hooks need to verify that scope enforcement blocks disallowed actions and audit logging captures the right events. Mock the tool call inputs and verify the hook outputs (allow/block) and side effects (audit log entries).
-- **MCP server tools**: The memory and reference resolver MCP tools wrap the stores. Mock the store layer and verify the MCP tool translates requests and responses correctly.
-- **Agent process manager**: Mock the subprocess spawn/kill and verify lifecycle management (start, monitor, stop, error handling).
-
-**What NOT to unit test (test manually or in integration):**
-- Actual Claude Agent SDK calls and agent behavior. These require real API calls and are non-deterministic. Test the *harness* (identity, hooks, MCP tools), not the LLM responses.
-- Tauri IPC integration. Test the command handlers' logic, but the actual IPC bridge is Tauri's responsibility.
-- Frontend components in Phase 1. The UI is minimal and exploratory — invest testing effort in the backend and agent infrastructure.
-
-**Test naming**: Describe the behavior being verified, not the function name. `test_scope_enforcement_blocks_write_outside_file_glob` is better than `test_enforce_scope`.
-
-**Test location**: Tests live next to the code they test. Rust tests in the same file or a `tests/` submodule. TypeScript tests in a `tests/` directory within the `agents/` package, mirroring the source structure.
+The *intended* authority for "done" is machine-checked behavior plus mutation score — see [ADR-007](docs/adr/007-review-truth-model.md). **Today's actual gate is the unit suite plus human review (optionally `/review-branch`)** — the tagged acceptance tier and mutation testing ADR-007 describes are adopted as policy but **not yet built**, tracked by #50 and #51. Treat acceptance/mutation as the target, not the current process, until those land.
 
 ## Phase 1 Scope (Foundation)
 
-### In Scope
-- Tauri 2.0 project scaffolding with Svelte + TypeScript frontend
-- SQLite memory store with FTS5 (Rust backend, exposed via Tauri commands)
-- JSONL audit store (Rust backend, append-only, per-project)
-- Memory MCP server (read/write/search tools)
-- Reference resolver MCP tool (resolve URI schemes: file://, standards://, memory://)
-- Single agent integration: one Code Agent with identity, scope enforcement, and audit hooks
-- Basic UI: project creation, agent status display, memory inspector
-- System default standards files (shipped with app)
-- Agent identity schema and scope enforcement via PreToolUse hooks
+**Done and merged**: SQLite memory store with FTS5 (#4), JSONL audit store (#5), reference resolver (#6), agent identity schema + PreToolUse scope enforcement (#7), PostToolUse audit hook (#10), Tauri scaffolding, system default standards.
 
-### Not In Scope (Later Phases)
-- Coordinator agents and multi-agent orchestration (Phase 2)
-- Reference manifest handoff protocol between agents (Phase 2)
-- Issue tracker MCP server (Phase 3)
-- Workflow engine, parallel execution, approval workflows (Phase 3)
-- Semantic search / vector embeddings (Phase 4)
-- FIDO-like cryptographic identity (Phase 5)
-- Cloud backends for memory or audit
+**Remaining in Phase 1**: memory MCP server (#8) and reference-resolver MCP tool (#9) — both currently stubs; single Code Agent integration (#11); Tauri IPC commands (#12); basic UI — project creation, agent status, memory inspector (#13).
 
-### Key Phase 1 Decision Points
-- **JSONL audit scoping**: Decide per-project vs per-session file granularity. Write an ADR.
-- **`createSdkMcpServer` verification**: Confirm the in-process MCP pattern works with current SDK version before building on it. If the API has changed, document the delta and adapt.
-- **Tauri sidecar setup**: Verify the Claude CLI sidecar bundling works cleanly on the target platform before building the agent process manager around it.
+**Not in scope (later phases)**: coordinator agents and multi-agent orchestration (Phase 2); reference manifest handoff protocol between agents (Phase 2); issue tracker MCP server (Phase 3); workflow engine, parallel execution, approval workflows (Phase 3); semantic search / vector embeddings (Phase 4); FIDO-like cryptographic identity (Phase 5); cloud backends for memory or audit.
 
-## Session Management
+## Session Continuity
 
-### Status Reports
-
-After completing each issue (or when context is running low), post a brief status report as a message to Kevin. Format:
-
-```
-**Status Report — Issue #NN**
-- Completed: (what was done)
-- Artifacts: (files created/modified, PRs opened)
-- Next: (what should happen next)
-- Context: (estimated context usage — low/medium/high — and whether to continue or hand off)
-```
-
-### Handoff Summaries
-
-When a session ends (context exhaustion, natural stopping point, or explicit request), write a handoff summary to `docs/handoff/session-NNN.md` (zero-padded three digits). This file gives the next session everything it needs to pick up the work without re-reading the entire codebase.
-
-Handoff format:
-
-```markdown
-# Session NNN — Handoff Summary
-
-**Date**: YYYY-MM-DD
-**Issues worked**: #NN, #NN
-
-## What was done
-(Concise list of completed work, with PR/commit references)
-
-## What's in progress
-(Anything started but not finished — branch names, open PRs, known issues)
-
-## What's next
-(Prioritized list of next tasks, with issue numbers)
-
-## Key context for the next session
-(Anything the next session needs to know that isn't in CLAUDE.md or the architecture doc — gotchas, decisions made during the session, things that didn't work)
-```
-
-The next session should read the most recent handoff file and CLAUDE.md before starting work.
+Session-to-session continuity comes from the memory layer, git history, and the issue tracker — not from handoff documents. After completing an issue (or when context runs low), post a brief status report to Kevin: what was completed, artifacts (files/PRs), what's next, and context usage (low/medium/high, continue or hand off).
 
 ## What Not To Do
 
@@ -301,3 +93,4 @@ The next session should read the most recent handoff file and CLAUDE.md before s
 - Do not add cloud dependencies or remote storage.
 - Do not skip writing ADRs for decisions that aren't covered by the architecture doc.
 - Do not put business logic in the Rust layer — it handles storage and process management. Agent logic lives in TypeScript.
+- Do not push to `main`, force-push, or modify `CLAUDE.md` without explicit approval (see [local-permissions.md](standards/process-standards/local-permissions.md)).
