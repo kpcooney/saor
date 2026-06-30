@@ -1,6 +1,6 @@
 # 001 — Audit Store JSONL File Granularity
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 

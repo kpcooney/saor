@@ -1,6 +1,6 @@
 # 005 — Targeted Re-Review Pattern for the Review Assistance Protocol
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 

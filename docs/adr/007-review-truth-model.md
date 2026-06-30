@@ -2,6 +2,10 @@
 
 **Status**: accepted
 
+**Implementation status**: Adopted as policy. The acceptance tier and mutation testing it
+prescribes are **not yet built** — today's gate is the unit suite plus human review (optionally
+`/review-branch`). The build-out is tracked by #50 (acceptance tier) and #51 (mutation testing).
+
 ## Context
 
 Kevin cannot fluently line-by-line review code across the three Phase 1
