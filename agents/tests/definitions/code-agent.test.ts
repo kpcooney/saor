@@ -341,4 +341,84 @@ describe('Code Agent integration against real stores', () => {
     const payload = JSON.parse(empty.content[0]!.text) as { results: unknown[] };
     expect(payload.results).toHaveLength(0);
   });
+
+  it('stamps audit events with the injected clock', async () => {
+    // The config injects `now: () => NOW`; buildCodeAgentQueryOptions must
+    // thread it into the hooks, or events would carry wall-clock timestamps.
+    const options = buildCodeAgentQueryOptions(config);
+    const preHooks = options.hooks!.PreToolUse![0]!.hooks;
+    const postHooks = options.hooks!.PostToolUse![0]!.hooks;
+
+    const toolInput = { file_path: 'agents/src/definitions/clock.ts', content: 'ok' };
+    await firePreToolUse(preHooks, 'Write', toolInput, 'tool-clock');
+    await firePostToolUse(postHooks, 'Write', toolInput, { ok: true }, 'tool-clock');
+
+    const events = readAuditEvents(auditPath);
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.timestamp).toBe(NOW.toISOString());
+    }
+  });
+
+  it('denies every tool call once the identity has expired and logs it', async () => {
+    // Drive an expired code-agent identity through the wiring: the file and
+    // tool checks pass for an in-scope Write, so the denial can only come from
+    // the expiry check — proving buildCodeAgentQueryOptions wired `now` into the
+    // scope hook's expiry evaluation.
+    const createdAt = new Date(NOW.getTime() - 60 * 60 * 1000); // 1h before NOW
+    const expiredIdentity = createCodeAgentIdentity({
+      delegatedBy: 'human:kevin',
+      purpose: 'expired-agent test',
+      issue: '11',
+      now: createdAt,
+      ttlMs: 1000, // expires 1s after creation — well before NOW
+    });
+    const options = buildCodeAgentQueryOptions({ ...config, identity: expiredIdentity });
+    const preHooks = options.hooks!.PreToolUse![0]!.hooks;
+
+    const outputs = await firePreToolUse(
+      preHooks,
+      'Write',
+      { file_path: 'agents/src/definitions/in-scope.ts', content: 'ok' },
+      'tool-expired',
+    );
+    expect(permissionDecision(outputs[0]!)).toBe('deny');
+
+    const expiredEvent = readAuditEvents(auditPath).find(
+      (e) => e.eventType === 'credential.expired',
+    );
+    expect(expiredEvent?.result).toBe('blocked');
+    expect(expiredEvent?.agentId).toBe(expiredIdentity.id);
+  });
+
+  it('allows a granted MCP tool but blocks a tool absent from scope.tools', async () => {
+    // The reason MCP tool names are added to scope.tools is that a tool not on
+    // the allowlist is denied. Assert both directions through the wiring: a
+    // granted memory tool is allowed; an ungranted tool is blocked and logged.
+    const options = buildCodeAgentQueryOptions(config);
+    const preHooks = options.hooks!.PreToolUse![0]!.hooks;
+
+    const grantedOut = await firePreToolUse(
+      preHooks,
+      `mcp__${MEMORY_MCP_SERVER_NAME}__memory_read`,
+      { query: 'anything' },
+      'tool-granted',
+    );
+    expect(permissionDecision(grantedOut[0]!)).toBe('allow');
+
+    const blockedOut = await firePreToolUse(
+      preHooks,
+      'WebFetch',
+      { url: 'https://example.com' },
+      'tool-ungranted',
+    );
+    expect(permissionDecision(blockedOut[0]!)).toBe('deny');
+
+    // Scope-violation events carry the tool in details but not the toolUseId
+    // (that correlation key is stamped by the audit hooks, not the scope hook),
+    // and only the ungranted call produces a tool.blocked event.
+    const blockedEvent = readAuditEvents(auditPath).find((e) => e.eventType === 'tool.blocked');
+    expect(blockedEvent?.result).toBe('blocked');
+    expect(blockedEvent?.details.tool).toBe('WebFetch');
+  });
 });
