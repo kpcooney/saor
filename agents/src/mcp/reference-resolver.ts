@@ -130,6 +130,15 @@ export async function resolveReference(
   }
 }
 
+/**
+ * The MCP server name for the `resolve_ref` tool. Exported so callers that both
+ * register the server (as the `mcpServers` record key) and grant its tool
+ * (which the SDK namespaces as `mcp__{serverName}__resolve_ref`) derive both
+ * from a single source, and cannot drift out of sync. See
+ * `createReferenceResolverMcpServer`.
+ */
+export const REFERENCE_RESOLVER_MCP_SERVER_NAME = 'reference-resolver';
+
 /** Configuration for {@link createReferenceResolverMcpServer}. */
 export interface ReferenceResolverMcpServerConfig {
   /** The resolver the tool dereferences URIs through. */
@@ -163,7 +172,7 @@ export function createReferenceResolverMcpServer(
   );
 
   return createSdkMcpServer({
-    name: 'reference-resolver',
+    name: REFERENCE_RESOLVER_MCP_SERVER_NAME,
     tools: [resolveTool],
   });
 }
