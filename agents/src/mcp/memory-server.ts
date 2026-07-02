@@ -145,6 +145,14 @@ export function memoryToolContextFromIdentity(
   };
 }
 
+/**
+ * The MCP server name for the memory tools. Exported so callers that both
+ * register the server (as the `mcpServers` record key) and grant its tools
+ * (which the SDK namespaces as `mcp__{serverName}__{tool}`) derive both from a
+ * single source, and cannot drift out of sync. See `createMemoryMcpServer`.
+ */
+export const MEMORY_MCP_SERVER_NAME = 'project-memory';
+
 /** Default number of entries returned by `memory_read` when no limit is given. */
 export const DEFAULT_MEMORY_READ_LIMIT = 10;
 /** Upper bound on `memory_read` results, to keep a single call's payload bounded. */
@@ -366,7 +374,7 @@ export function createMemoryMcpServer(
   );
 
   return createSdkMcpServer({
-    name: 'project-memory',
+    name: MEMORY_MCP_SERVER_NAME,
     tools: [readTool, writeTool, contextTool],
   });
 }
