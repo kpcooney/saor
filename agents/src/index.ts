@@ -51,6 +51,21 @@ export type {
   AuditLogger,
 } from './hooks/audit-logger.js';
 
+// Reference-resolver MCP server (issue #8/#9): the `resolve_ref` tool that
+// dereferences reference-manifest URIs, defined against the ReferenceResolver
+// port. The concrete IPC-backed resolver adapter lands with the Tauri IPC work
+// (issue #12).
+export {
+  createReferenceResolverMcpServer,
+  resolveReference,
+  parseScheme,
+} from './mcp/reference-resolver.js';
+export type {
+  ReferenceResolver,
+  ResolvedReference,
+  ResolveReferenceArgs,
+  ReferenceResolverMcpServerConfig,
+} from './mcp/reference-resolver.js';
 // Memory MCP server (issue #8): the in-process MCP tools for reading and
 // writing project memory, defined against the MemoryStore port. The concrete
 // IPC-backed store adapter lands with the Tauri IPC work (issue #12).
