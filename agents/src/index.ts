@@ -50,3 +50,28 @@ export type {
   AuditResult,
   AuditLogger,
 } from './hooks/audit-logger.js';
+
+// Memory MCP server (issue #8): the in-process MCP tools for reading and
+// writing project memory, defined against the MemoryStore port. The concrete
+// IPC-backed store adapter lands with the Tauri IPC work (issue #12).
+export {
+  createMemoryMcpServer,
+  memoryRead,
+  memoryWrite,
+  memoryContext,
+  memoryToolContextFromIdentity,
+  DEFAULT_MEMORY_READ_LIMIT,
+  MAX_MEMORY_READ_LIMIT,
+} from './mcp/memory-server.js';
+export type {
+  MemoryCategory,
+  MemoryEntry,
+  MemoryStore,
+  KeywordSearchOptions,
+  ProjectContext,
+  MemoryToolContext,
+  MemoryReadArgs,
+  MemoryWriteArgs,
+  MemoryToolDeps,
+  MemoryMcpServerConfig,
+} from './mcp/memory-server.js';
