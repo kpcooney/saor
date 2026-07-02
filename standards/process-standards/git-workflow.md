@@ -24,9 +24,25 @@ All development work follows a branch-and-PR model. Work happens on feature bran
 
 6. **Wait for review.** Kevin will leave comments on GitHub. Do not merge while waiting.
 
-7. **Address review comments** by pushing additional commits to the same branch. Do not force-push or squash during review — the reviewer needs to see what changed in response to their feedback.
+7. **Address review comments** by pushing additional commits to the same branch. Do not force-push or squash during review — the reviewer needs to see what changed in response to their feedback. See [Responding to Review Comments](#responding-to-review-comments) for how to handle each comment.
 
 8. **Kevin merges.** Do not merge your own PRs.
+
+## Responding to Review Comments
+
+Review is a conversation, not a rubber stamp. For each comment Kevin leaves, you have three options:
+
+- **Justify** — if you believe the current approach is correct, reply on the thread explaining your reasoning. Be specific: reference architecture decisions, trade-offs, or constraints that informed the choice. Kevin may accept the justification or push back.
+- **Adjust** — if the feedback is valid, make the change. Push a new commit to the branch (do **not** force-push or squash — the history should show what changed in response to which feedback). Reply on the thread noting what you changed and in which commit.
+- **Clarify** — if the comment is ambiguous or you need more context to act on it, ask a clarifying question on the thread.
+
+After you've responded to all comments, Kevin re-reviews. This may produce another round; the loop continues until Kevin is satisfied, then he approves and merges.
+
+**Do not resolve Kevin's review comments.** Only Kevin marks conversations as resolved, after reviewing your response. Do not merge your own PRs.
+
+## ADR Status on Merge
+
+If a PR implements or finalizes an ADR, flip that ADR's status from `proposed` to `accepted` in the same PR. The merge is what makes the decision accepted (see [docs/adr/README.md](../../docs/adr/README.md)); updating the status field is part of landing the change, not a separate follow-up.
 
 ## What Can Be Done Autonomously
 

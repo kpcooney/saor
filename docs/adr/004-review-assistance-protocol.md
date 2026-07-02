@@ -1,6 +1,6 @@
 # 004 — Review Assistance Protocol (Claude-Code-Orchestrated Three-Reviewer Pattern)
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 

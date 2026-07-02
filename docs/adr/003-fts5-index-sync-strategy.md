@@ -1,6 +1,6 @@
 # 003 — FTS5 Index Sync Strategy
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 

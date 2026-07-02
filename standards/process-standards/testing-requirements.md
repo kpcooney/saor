@@ -2,6 +2,20 @@
 
 Tests are required for all non-trivial functionality and go through PR review alongside the implementation. This document defines what to test, how to test it, and how to name tests.
 
+## Acceptance Tier & Review-Truth
+
+Kevin cannot fluently line-by-line review across Rust, Svelte, and TypeScript. The intended authoritative signal that an issue is done is therefore machine-checked behavior plus mutation score — not Kevin reading the diff, and not the agent's own summary of its work. This is the "review-truth" model adopted in [ADR-007](../../docs/adr/007-review-truth-model.md).
+
+**Today's actual gate** (current reality): the unit suite (below) plus human review, optionally assisted by `/review-branch`. There is **no automated acceptance/mutation gate yet** — no CI runs on PRs.
+
+**The adopted target** (ADR-007, not yet implemented):
+
+- A tagged **acceptance tier**, separate from the unit suite. Each acceptance test maps to a GitHub issue and is the executable definition of done for it. Acceptance tests use **real stores** (temp-dir files, in-memory SQLite) and verify side effects by reading them back — no mocks at this tier. Each includes a **negative control**, so a green result can't be green for the wrong reason.
+- **Mutation testing** on the load-bearing modules (identity/scope, audit, reference resolver, memory store, standards resolution). Mutation score — not coverage — measures whether the tests would actually catch a regression.
+- The PR summary and any agent self-review are **orientation only** — they tell Kevin where to look; they do not close the issue.
+
+Building this tier is tracked by #50 (acceptance tier) and #51 (mutation testing). Until those land, treat the acceptance/mutation language as the target, not the current process.
+
 ## What to Test Directly (No Mocks)
 
 These components have deterministic, side-effect-free behavior that can be tested with real backends. Do not mock them — use real implementations.

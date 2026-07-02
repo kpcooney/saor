@@ -1,6 +1,6 @@
 # 002 — Agent Layer Process Strategy
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 
