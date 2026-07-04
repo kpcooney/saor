@@ -122,6 +122,23 @@ impl FileSystemAuditStore {
             .collect())
     }
 
+    /// Returns the most recent `limit` events, newest first, across all
+    /// audit files.
+    ///
+    /// Events are stored chronologically (by day-file name, then append
+    /// order within a file), so "most recent" is the tail of the full
+    /// history; this reverses that tail so the newest event is first —
+    /// the order an audit viewer wants to show. A `limit` of 0 returns an
+    /// empty list. Malformed lines are skipped (see `read_all_events`).
+    pub fn get_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, AuditError> {
+        let (mut events, _malformed) = self.read_all_events()?;
+        // Keep only the last `limit` in chronological order, then reverse
+        // so the newest event leads.
+        let start = events.len().saturating_sub(limit);
+        let recent = events.split_off(start);
+        Ok(recent.into_iter().rev().collect())
+    }
+
     /// Returns the list of malformed JSONL lines encountered when
     /// reading the audit history. Each record carries the file path,
     /// 1-indexed line number, and parse-error string so callers (audit

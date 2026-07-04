@@ -8,7 +8,8 @@ This is the Rust backend, following Tauri's standard convention where the native
 - **Reference resolver** (`references/`) — resolves URI schemes (`file://`, `standards://`, `memory://`, `audit://`) used in agent reference manifests
 - **Agent identity and scope validation** (`identity/`) — validates `AgentIdentity` structs and enforces file glob and tool allowlist restrictions
 - **Agent process lifecycle** (`process/`) — spawns, monitors, and terminates the TypeScript agent sidecar processes
-- **IPC command handlers** (`src/lib.rs`) — Tauri `#[tauri::command]` functions that bridge frontend `invoke()` calls to the modules above
+- **Project registry** (`project/`) — app-level SQLite index of known projects (the "known projects" list the UI opens), stored in the Tauri app-data directory; see [ADR-008](../docs/adr/008-project-registry.md)
+- **IPC command handlers** (`commands/`, registered in `src/lib.rs`) — thin Tauri `#[tauri::command]` functions that bridge frontend `invoke()` calls to the modules above (project, memory, audit, and agent-session commands)
 
 **What it is NOT responsible for:** Agent business logic, agent orchestration, and MCP server definitions. Those live in the `agents/` TypeScript package. The Rust layer is deliberately thin — stable infrastructure that doesn't change often, so that iteration happens in the agent layer where the interesting work is.
 
