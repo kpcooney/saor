@@ -27,6 +27,12 @@ use uuid::Uuid;
 use crate::audit::FileSystemAuditStore;
 use crate::memory::SqliteMemoryStore;
 
+/// Marker file written as the final step of project initialization. Its
+/// presence means the on-disk stores are fully initialized; a registered path
+/// missing it is a partially-created project to be healed forward (see
+/// `create`).
+const INIT_SENTINEL: &str = ".initialized";
+
 /// Errors produced by registry operations.
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -47,6 +53,9 @@ pub enum ProjectError {
 
     #[error("failed to initialize project audit store: {0}")]
     Audit(#[from] crate::audit::AuditError),
+
+    #[error("failed to initialize project stores: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A project record as stored in the registry and returned across IPC.
@@ -108,16 +117,23 @@ impl ProjectRegistry {
         Ok(())
     }
 
-    /// Registers a new project and initializes its on-disk stores.
+    /// Registers a project and initializes its on-disk stores, healing a
+    /// previous partial create rather than rolling one back.
     ///
-    /// The registry row is inserted **first**, so the `UNIQUE(path)` constraint
-    /// is the authoritative "one project per path" guard: a duplicate path is
-    /// refused as `PathAlreadyExists` before any files are written, leaving no
-    /// orphaned `.sdlc/` tree. If initializing the on-disk stores then fails,
-    /// the just-inserted row and the partially-created `.sdlc/` are rolled
-    /// back, so a failed create never leaves a half-initialized, un-retryable
-    /// path. An initialized project already present on disk (created by another
-    /// registry) is also refused rather than reopened.
+    /// The registry row is inserted first, then the stores are initialized and
+    /// an `.initialized` sentinel is written **last**. This avoids any
+    /// compensating rollback — whose own failure (a failed `DELETE` or
+    /// `remove_dir_all`) could re-orphan state and reintroduce a bricked path.
+    /// Instead, partial state is completed forward:
+    ///
+    /// - A path holding a **fully initialized** project (sentinel present) is
+    ///   refused as `PathAlreadyExists` — whether it is registered here (a
+    ///   duplicate) or an unregistered project on disk (never reopened/adopted).
+    /// - A **registered path whose stores are missing or incomplete** (row
+    ///   present, sentinel absent) is the residue of a create whose store init
+    ///   failed; it is completed idempotently ("healed") and returned. A store
+    ///   init that fails again simply leaves it healable for the next call, with
+    ///   nothing to undo.
     pub fn create(
         &self,
         name: &str,
@@ -132,21 +148,41 @@ impl ProjectRegistry {
             )));
         }
 
-        // Refuse a path that already holds an initialized project on disk —
-        // never reinitialize over existing data (e.g. one created by another
-        // registry). Checked before any writes.
-        let memory_db = project_path.join(".sdlc").join("memory.db");
-        if memory_db.exists() {
+        let sdlc_dir = project_path.join(".sdlc");
+        let sentinel = sdlc_dir.join(INIT_SENTINEL);
+        let memory_db = sdlc_dir.join("memory.db");
+
+        // A path already registered here: a complete duplicate to refuse, or a
+        // partial create to complete forward. The row lookup is load-bearing —
+        // it distinguishes those two and yields the id to heal under.
+        if let Some(existing) = self.find_by_path(&path_str)? {
+            if sentinel.exists() {
+                return Err(ProjectError::PathAlreadyExists(path_str));
+            }
+            self.init_project_stores(
+                project_path,
+                &memory_db,
+                &existing.id,
+                &existing.name,
+                &existing.description,
+                &existing.created_at,
+            )?;
+            return Ok(existing);
+        }
+
+        // Not registered: refuse an unregistered project already on disk rather
+        // than adopt or clobber it.
+        if memory_db.exists() || sentinel.exists() {
             return Err(ProjectError::PathAlreadyExists(path_str));
         }
 
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().to_rfc3339();
 
-        // Insert the registry row first: UNIQUE(path) is the authoritative
-        // duplicate guard, and inserting before any filesystem work means a
-        // duplicate is refused (mapped to PathAlreadyExists) without creating
-        // an orphaned .sdlc/ tree.
+        // Insert the registry row first. UNIQUE(path) is the race-safe duplicate
+        // guard (mapped to PathAlreadyExists). If store init then fails, the row
+        // is left without a sentinel — the next create() heals it forward, so
+        // there is no compensating delete that could itself fail.
         match self.conn.execute(
             "INSERT INTO projects (id, name, path, description, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -161,23 +197,14 @@ impl ProjectRegistry {
             Err(e) => return Err(ProjectError::Database(e)),
         }
 
-        // Initialize the on-disk stores. On any failure, roll back the row and
-        // remove the partially-created tree so the create leaves no trace and
-        // the path stays retryable.
-        if let Err(e) = self.init_project_stores(
+        self.init_project_stores(
             project_path,
             &memory_db,
             &id,
             name,
             description,
             &created_at,
-        ) {
-            let _ = self
-                .conn
-                .execute("DELETE FROM projects WHERE id = ?1", params![id]);
-            let _ = std::fs::remove_dir_all(project_path.join(".sdlc"));
-            return Err(e);
-        }
+        )?;
 
         Ok(ProjectRecord {
             id,
@@ -188,9 +215,15 @@ impl ProjectRegistry {
         })
     }
 
-    /// Initializes a project's on-disk stores: the memory database (with the
-    /// project registered inside it so memory-entry foreign keys resolve) and
-    /// the audit directory.
+    /// Initializes a project's on-disk stores idempotently: the memory database
+    /// (with the project registered inside it so memory-entry foreign keys
+    /// resolve), the audit directory, and finally the `.initialized` sentinel.
+    ///
+    /// The sentinel is written last, so its presence is a reliable "fully
+    /// initialized" marker: if any earlier step failed it is absent, and the
+    /// project reads as healable. Every step is safe to re-run, so calling this
+    /// again to complete a partial create no-ops the parts that already
+    /// succeeded.
     fn init_project_stores(
         &self,
         project_path: &Path,
@@ -203,6 +236,7 @@ impl ProjectRegistry {
         let memory = SqliteMemoryStore::new(memory_db)?;
         memory.register_project(id, name, description, created_at)?;
         FileSystemAuditStore::new(project_path)?;
+        std::fs::write(project_path.join(".sdlc").join(INIT_SENTINEL), b"")?;
         Ok(())
     }
 
@@ -234,6 +268,18 @@ impl ProjectRegistry {
     /// memory/audit/agent commands to locate a project's stores.
     pub fn path_for(&self, id: &str) -> Result<PathBuf, ProjectError> {
         Ok(PathBuf::from(self.get(id)?.path))
+    }
+
+    /// Returns the project registered at `path`, if any.
+    fn find_by_path(&self, path: &str) -> Result<Option<ProjectRecord>, ProjectError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, name, path, description, created_at FROM projects WHERE path = ?1",
+                params![path],
+                row_to_record,
+            )
+            .optional()?)
     }
 }
 
@@ -330,24 +376,23 @@ mod tests {
     }
 
     #[test]
-    fn test_create_on_registered_path_after_sdlc_deleted_is_refused_via_unique() {
-        // Even if the on-disk .sdlc is gone, a still-registered path is refused
-        // by the UNIQUE(path) constraint — mapped to PathAlreadyExists, not a
-        // raw database error — and no orphaned tree is left behind.
+    fn test_create_on_registered_path_with_missing_stores_heals_forward() {
+        // A registered path whose stores are gone (here, .sdlc deleted; in
+        // practice, a create whose store-init step failed) is completed forward
+        // rather than refused or rolled back. The existing record is preserved.
         let (registry, tmp) = setup();
         let project_path = tmp.path().join("proj");
-        let first = registry.create("First", &project_path, "").unwrap();
+        let first = registry.create("First", &project_path, "original").unwrap();
         std::fs::remove_dir_all(project_path.join(".sdlc")).unwrap();
 
-        let err = registry.create("Second", &project_path, "").unwrap_err();
-        assert!(
-            matches!(err, ProjectError::PathAlreadyExists(_)),
-            "UNIQUE(path) violation must map to PathAlreadyExists, got {err:?}"
-        );
-        // The failed create rolled back — still exactly one project, unchanged,
-        // and it did not re-create the deleted .sdlc tree.
+        // Re-creating heals: the stores (and sentinel) are rebuilt, and the
+        // original record is returned even though different args were passed.
+        let healed = registry.create("Second", &project_path, "ignored").unwrap();
+        assert_eq!(healed.id, first.id, "heal preserves the original record");
+        assert_eq!(healed.name, "First");
+        assert!(project_path.join(".sdlc").join("memory.db").exists());
+        assert!(project_path.join(".sdlc").join(".initialized").exists());
+        // Still exactly one project — heal did not duplicate the row.
         assert_eq!(registry.list().unwrap().len(), 1);
-        assert_eq!(registry.get(&first.id).unwrap().name, "First");
-        assert!(!project_path.join(".sdlc").exists());
     }
 }
