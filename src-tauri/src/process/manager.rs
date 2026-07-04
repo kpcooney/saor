@@ -263,6 +263,26 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_is_idempotent_second_call_is_a_noop() {
+        let (mut manager, _count, killed) = manager_with(false);
+        let session = manager
+            .start("proj-1", Path::new("/tmp/proj"), "code-agent", "task")
+            .unwrap();
+
+        manager.stop(&session.session_id).unwrap();
+        killed.store(false, Ordering::SeqCst); // reset so a second kill would show
+
+        // Second stop: the handle was already taken, so no kill fires, and the
+        // session stays Stopped (no panic on the consumed handle).
+        let again = manager.stop(&session.session_id).unwrap();
+        assert_eq!(again.status, AgentStatus::Stopped);
+        assert!(
+            !killed.load(Ordering::SeqCst),
+            "second stop must not kill again"
+        );
+    }
+
+    #[test]
     fn test_status_and_stop_for_unknown_session_error() {
         let (mut manager, _count, _killed) = manager_with(false);
         assert!(manager.status("nope").is_err());

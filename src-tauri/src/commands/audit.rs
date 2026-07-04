@@ -16,6 +16,10 @@ use crate::project::ProjectRegistry;
 /// gives no limit.
 const DEFAULT_RECENT_LIMIT: usize = 50;
 
+/// Upper bound on `audit_get_recent` results, keeping a single response bounded
+/// regardless of the caller-supplied limit.
+const MAX_RECENT_LIMIT: usize = 500;
+
 /// Opens the audit store rooted at a project resolved through the registry.
 fn open_store(
     registry: &ProjectRegistry,
@@ -48,13 +52,17 @@ pub fn by_agent(
 }
 
 /// Returns the most recent `limit` events (newest first) within the project.
+///
+/// `None` uses the default; a given limit is capped at `MAX_RECENT_LIMIT`, and
+/// `0` returns an empty list (matching `memory_search`'s limit semantics).
 pub fn recent(
     registry: &ProjectRegistry,
     project_id: &str,
     limit: Option<usize>,
 ) -> Result<Vec<AuditEvent>, String> {
+    let limit = limit.unwrap_or(DEFAULT_RECENT_LIMIT).min(MAX_RECENT_LIMIT);
     open_store(registry, project_id)?
-        .get_recent(limit.unwrap_or(DEFAULT_RECENT_LIMIT))
+        .get_recent(limit)
         .map_err(|e| e.to_string())
 }
 

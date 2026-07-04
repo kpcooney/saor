@@ -18,13 +18,17 @@ use crate::memory::{MemoryCategory, MemoryEntry, SqliteMemoryStore};
 use crate::project::ProjectRegistry;
 
 /// Default number of results returned by `memory_search` when the caller
-/// gives no limit. Bounds a single response's size for the UI.
+/// gives no limit.
 const DEFAULT_SEARCH_LIMIT: i64 = 20;
+
+/// Upper bound on `memory_search` results, so a single response's size for the
+/// UI stays bounded regardless of the caller-supplied limit.
+const MAX_SEARCH_LIMIT: i64 = 100;
 
 /// `created_by` stamped on entries written through the IPC command. These are
 /// user-initiated writes from the UI; agent-authored writes (which carry the
 /// agent's identity id) arrive via the memory MCP tool once the Node↔Rust
-/// storage bridge lands. See the bridge follow-up issue.
+/// storage bridge lands (#59).
 const IPC_AUTHOR: &str = "user";
 
 /// Opens the memory store for a project resolved through the registry.
@@ -72,6 +76,11 @@ pub fn write(
 }
 
 /// Keyword-searches the project's memory, most relevant first.
+///
+/// Limit semantics match `audit_get_recent`: `None` uses the default; a given
+/// limit is clamped to `[0, MAX_SEARCH_LIMIT]`, so `0` returns an empty list
+/// and negatives (which SQLite would otherwise treat as "no limit") are floored
+/// to `0` rather than silently returning everything.
 pub fn search(
     registry: &ProjectRegistry,
     project_id: &str,
@@ -79,7 +88,9 @@ pub fn search(
     limit: Option<i64>,
 ) -> Result<Vec<MemoryEntry>, String> {
     let store = open_store(registry, project_id)?;
-    let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1);
+    let limit = limit
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .clamp(0, MAX_SEARCH_LIMIT);
     store.search(query, limit).map_err(|e| e.to_string())
 }
 

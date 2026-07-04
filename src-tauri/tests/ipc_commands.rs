@@ -87,6 +87,12 @@ fn memory_write_then_search_and_read_round_trips_a_known_entry() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, id);
 
+    // A limit of 0 returns nothing even for a matching query (limit semantics
+    // match audit_get_recent), rather than silently clamping up to one result.
+    assert!(memory::search(&registry, &project.id, "FTS5", Some(0))
+        .unwrap()
+        .is_empty());
+
     // Read by id returns the same entry, fields intact.
     let entry = memory::read(&registry, &project.id, &id).unwrap();
     assert_eq!(
@@ -94,6 +100,8 @@ fn memory_write_then_search_and_read_round_trips_a_known_entry() {
         "FTS5 keeps the memory index in sync via triggers"
     );
     assert_eq!(entry.metadata["source"], "acceptance");
+    // IPC writes are stamped as user-authored until the agent bridge (#59).
+    assert_eq!(entry.created_by, "user");
 }
 
 #[test]

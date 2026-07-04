@@ -577,6 +577,39 @@ mod tests {
     }
 
     #[test]
+    fn test_get_recent_returns_newest_first_and_handles_boundary_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+        for i in 0..3 {
+            store
+                .log(&test_event(
+                    &format!("evt-{i}"),
+                    "session-1",
+                    "agent-1",
+                    AuditEventType::ToolInvoked,
+                ))
+                .unwrap();
+        }
+
+        // limit 0 → empty (documented boundary).
+        assert!(store.get_recent(0).unwrap().is_empty());
+
+        // limit < history → the newest `limit`, newest first.
+        let two = store.get_recent(2).unwrap();
+        assert_eq!(
+            two.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["evt-2", "evt-1"]
+        );
+
+        // limit > history → all events, newest first, no panic.
+        let all = store.get_recent(100).unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["evt-2", "evt-1", "evt-0"]
+        );
+    }
+
+    #[test]
     fn test_event_serialization_round_trip() {
         let event = AuditEvent {
             id: "evt-rt".to_string(),

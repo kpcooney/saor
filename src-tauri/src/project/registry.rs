@@ -110,11 +110,14 @@ impl ProjectRegistry {
 
     /// Registers a new project and initializes its on-disk stores.
     ///
-    /// Refuses (without clobbering) if the path is already registered here or
-    /// if an initialized project already exists on disk at that path. On
-    /// success the project's `.sdlc/memory.db` and audit directory exist, the
-    /// project is registered inside its own memory database, and a row is
-    /// recorded in this registry.
+    /// The registry row is inserted **first**, so the `UNIQUE(path)` constraint
+    /// is the authoritative "one project per path" guard: a duplicate path is
+    /// refused as `PathAlreadyExists` before any files are written, leaving no
+    /// orphaned `.sdlc/` tree. If initializing the on-disk stores then fails,
+    /// the just-inserted row and the partially-created `.sdlc/` are rolled
+    /// back, so a failed create never leaves a half-initialized, un-retryable
+    /// path. An initialized project already present on disk (created by another
+    /// registry) is also refused rather than reopened.
     pub fn create(
         &self,
         name: &str,
@@ -129,11 +132,9 @@ impl ProjectRegistry {
             )));
         }
 
-        // Refuse a path already registered here, or one that already holds an
-        // initialized project on disk — never reinitialize over existing data.
-        if self.find_by_path(&path_str)?.is_some() {
-            return Err(ProjectError::PathAlreadyExists(path_str));
-        }
+        // Refuse a path that already holds an initialized project on disk —
+        // never reinitialize over existing data (e.g. one created by another
+        // registry). Checked before any writes.
         let memory_db = project_path.join(".sdlc").join("memory.db");
         if memory_db.exists() {
             return Err(ProjectError::PathAlreadyExists(path_str));
@@ -142,17 +143,41 @@ impl ProjectRegistry {
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().to_rfc3339();
 
-        // Initialize the project's own stores, then register the project
-        // inside its memory database so memory-entry foreign keys resolve.
-        let memory = SqliteMemoryStore::new(&memory_db)?;
-        memory.register_project(&id, name, description, &created_at)?;
-        FileSystemAuditStore::new(project_path)?;
-
-        self.conn.execute(
+        // Insert the registry row first: UNIQUE(path) is the authoritative
+        // duplicate guard, and inserting before any filesystem work means a
+        // duplicate is refused (mapped to PathAlreadyExists) without creating
+        // an orphaned .sdlc/ tree.
+        match self.conn.execute(
             "INSERT INTO projects (id, name, path, description, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, name, path_str, description, created_at],
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(ProjectError::PathAlreadyExists(path_str));
+            }
+            Err(e) => return Err(ProjectError::Database(e)),
+        }
+
+        // Initialize the on-disk stores. On any failure, roll back the row and
+        // remove the partially-created tree so the create leaves no trace and
+        // the path stays retryable.
+        if let Err(e) = self.init_project_stores(
+            project_path,
+            &memory_db,
+            &id,
+            name,
+            description,
+            &created_at,
+        ) {
+            let _ = self
+                .conn
+                .execute("DELETE FROM projects WHERE id = ?1", params![id]);
+            let _ = std::fs::remove_dir_all(project_path.join(".sdlc"));
+            return Err(e);
+        }
 
         Ok(ProjectRecord {
             id,
@@ -161,6 +186,24 @@ impl ProjectRegistry {
             description: description.to_string(),
             created_at,
         })
+    }
+
+    /// Initializes a project's on-disk stores: the memory database (with the
+    /// project registered inside it so memory-entry foreign keys resolve) and
+    /// the audit directory.
+    fn init_project_stores(
+        &self,
+        project_path: &Path,
+        memory_db: &Path,
+        id: &str,
+        name: &str,
+        description: &str,
+        created_at: &str,
+    ) -> Result<(), ProjectError> {
+        let memory = SqliteMemoryStore::new(memory_db)?;
+        memory.register_project(id, name, description, created_at)?;
+        FileSystemAuditStore::new(project_path)?;
+        Ok(())
     }
 
     /// Returns the project with the given id, or `NotFound`.
@@ -191,17 +234,6 @@ impl ProjectRegistry {
     /// memory/audit/agent commands to locate a project's stores.
     pub fn path_for(&self, id: &str) -> Result<PathBuf, ProjectError> {
         Ok(PathBuf::from(self.get(id)?.path))
-    }
-
-    fn find_by_path(&self, path: &str) -> Result<Option<ProjectRecord>, ProjectError> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id, name, path, description, created_at FROM projects WHERE path = ?1",
-                params![path],
-                row_to_record,
-            )
-            .optional()?)
     }
 }
 
@@ -295,5 +327,27 @@ mod tests {
 
         let err = registry.create("Shared", &project_path, "").unwrap_err();
         assert!(matches!(err, ProjectError::PathAlreadyExists(_)));
+    }
+
+    #[test]
+    fn test_create_on_registered_path_after_sdlc_deleted_is_refused_via_unique() {
+        // Even if the on-disk .sdlc is gone, a still-registered path is refused
+        // by the UNIQUE(path) constraint — mapped to PathAlreadyExists, not a
+        // raw database error — and no orphaned tree is left behind.
+        let (registry, tmp) = setup();
+        let project_path = tmp.path().join("proj");
+        let first = registry.create("First", &project_path, "").unwrap();
+        std::fs::remove_dir_all(project_path.join(".sdlc")).unwrap();
+
+        let err = registry.create("Second", &project_path, "").unwrap_err();
+        assert!(
+            matches!(err, ProjectError::PathAlreadyExists(_)),
+            "UNIQUE(path) violation must map to PathAlreadyExists, got {err:?}"
+        );
+        // The failed create rolled back — still exactly one project, unchanged,
+        // and it did not re-create the deleted .sdlc tree.
+        assert_eq!(registry.list().unwrap().len(), 1);
+        assert_eq!(registry.get(&first.id).unwrap().name, "First");
+        assert!(!project_path.join(".sdlc").exists());
     }
 }
