@@ -29,11 +29,8 @@ pub type ManagerState = Mutex<AgentProcessManager>;
 /// Records a lifecycle audit event for a session into its project's audit
 /// store. The agent identity here is synthetic (`agent:{type}:{session}`) —
 /// real delegation chains arrive with the identity-carrying MCP writes once
-/// the Node↔Rust storage bridge lands.
-///
-/// Public so the acceptance tests can assert that starting/stopping an agent
-/// writes an audit event that reads back from the project's audit store.
-pub fn log_lifecycle_event(
+/// the Node↔Rust storage bridge lands (#59).
+fn log_lifecycle_event(
     registry: &ProjectRegistry,
     session: &AgentSession,
     event_type: AuditEventType,
@@ -136,4 +133,71 @@ pub fn agent_stop(
     }
 
     Ok(session.status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::process::manager::AgentSession;
+
+    fn session(project_id: &str) -> AgentSession {
+        AgentSession {
+            session_id: "session-1".to_string(),
+            project_id: project_id.to_string(),
+            agent_type: "code-agent".to_string(),
+            task: "do the thing".to_string(),
+            status: AgentStatus::Active,
+            started_at: "2026-07-05T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_lifecycle_events_are_written_to_the_project_audit_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ProjectRegistry::open_in_memory().unwrap();
+        let project = registry
+            .create("Acceptance", &tmp.path().join("proj"), "")
+            .unwrap();
+        let session = session(&project.id);
+
+        log_lifecycle_event(
+            &registry,
+            &session,
+            AuditEventType::AgentCreated,
+            "Started code-agent agent".to_string(),
+            None,
+        )
+        .unwrap();
+        log_lifecycle_event(
+            &registry,
+            &session,
+            AuditEventType::AgentCompleted,
+            "Stopped code-agent agent".to_string(),
+            Some("stopped by user".to_string()),
+        )
+        .unwrap();
+
+        // Both lifecycle events read back from the project's audit store,
+        // grouped by the session id, stamped with the synthetic agent identity.
+        let store = FileSystemAuditStore::new(&tmp.path().join("proj")).unwrap();
+        let events = store.get_by_session(&session.session_id).unwrap();
+        let types: Vec<&AuditEventType> = events.iter().map(|e| &e.event_type).collect();
+        assert!(types.contains(&&AuditEventType::AgentCreated));
+        assert!(types.contains(&&AuditEventType::AgentCompleted));
+        assert_eq!(events[0].agent_role, "code-agent");
+        assert_eq!(events[0].session_id, "session-1");
+    }
+
+    #[test]
+    fn test_lifecycle_event_for_unknown_project_errors() {
+        let registry = ProjectRegistry::open_in_memory().unwrap();
+        let result = log_lifecycle_event(
+            &registry,
+            &session("no-such-project"),
+            AuditEventType::AgentCreated,
+            "Started".to_string(),
+            None,
+        );
+        assert!(result.is_err());
+    }
 }

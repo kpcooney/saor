@@ -1,24 +1,19 @@
 // src-tauri/tests/ipc_commands.rs
 //
 // Acceptance tests for the Phase 1 IPC command layer (issue #12). These drive
-// the command-logic functions and the process manager against REAL backends —
+// the project/memory/audit command-logic functions against REAL backends —
 // a temp-dir project registry and its on-disk .sdlc stores, no mocks — and
 // read side effects back. Each capability carries a negative control so a
 // green run cannot be green for the wrong reason.
 //
 // The thin `#[tauri::command]` wrappers add only state-locking over these
-// functions and are not exercised here (they need a Tauri runtime); spawning
-// the real agent sidecar is covered by the #11 live integration check.
+// functions and are not exercised here (they need a Tauri runtime). Agent-
+// session behavior is unit-tested next to the code (see the note at the end).
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use saor_lib::audit::{AuditEvent, AuditEventType, AuditResult, FileSystemAuditStore};
-use saor_lib::commands::{agent, audit, memory};
-use saor_lib::process::manager::{
-    AgentHandle, AgentProcessManager, AgentSpawnSpec, AgentSpawner, AgentStatus,
-};
+use saor_lib::commands::{audit, memory};
 use saor_lib::project::{ProjectRecord, ProjectRegistry};
 
 /// Creates an in-memory registry plus a registered project under a temp dir.
@@ -204,77 +199,7 @@ fn audit_negative_controls_unknown_project_and_empty_history() {
         .is_empty());
 }
 
-// --- Agent-session commands (stub sidecar) ----------------------------------
-
-/// A stub spawner: no real process, just a flag flipped when the handle is
-/// killed. Lets the manager's lifecycle be driven without spawning anything.
-struct StubSpawner {
-    killed: Arc<AtomicBool>,
-}
-struct StubHandle {
-    killed: Arc<AtomicBool>,
-}
-impl AgentHandle for StubHandle {
-    fn kill(self: Box<Self>) -> Result<(), String> {
-        self.killed.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-}
-impl AgentSpawner for StubSpawner {
-    fn spawn(&self, _spec: &AgentSpawnSpec<'_>) -> Result<Box<dyn AgentHandle>, String> {
-        Ok(Box::new(StubHandle {
-            killed: Arc::clone(&self.killed),
-        }))
-    }
-}
-
-#[test]
-fn agent_lifecycle_start_active_stop_stopped_with_audit_events() {
-    let (registry, project, _tmp) = registry_with_project();
-    let killed = Arc::new(AtomicBool::new(false));
-    let mut manager = AgentProcessManager::new(Box::new(StubSpawner {
-        killed: Arc::clone(&killed),
-    }));
-
-    // Start → Active, and an agent.created event lands in the audit store.
-    let session = manager
-        .start(
-            &project.id,
-            Path::new(&project.path),
-            "code-agent",
-            "do the thing",
-        )
-        .unwrap();
-    assert_eq!(session.status, AgentStatus::Active);
-    agent::log_lifecycle_event(
-        &registry,
-        &session,
-        AuditEventType::AgentCreated,
-        "Started code-agent agent".to_string(),
-        None,
-    )
-    .unwrap();
-
-    // Stop → Stopped, process killed, agent.completed event lands.
-    let stopped = manager.stop(&session.session_id).unwrap();
-    assert_eq!(stopped.status, AgentStatus::Stopped);
-    assert!(killed.load(Ordering::SeqCst));
-    agent::log_lifecycle_event(
-        &registry,
-        &stopped,
-        AuditEventType::AgentCompleted,
-        "Stopped code-agent agent".to_string(),
-        Some("stopped by user".to_string()),
-    )
-    .unwrap();
-
-    // Both lifecycle events are readable back through the audit command for
-    // this session, newest-first.
-    let events = audit::by_session(&registry, &project.id, &session.session_id).unwrap();
-    let types: Vec<&AuditEventType> = events.iter().map(|e| &e.event_type).collect();
-    assert!(types.contains(&&AuditEventType::AgentCreated));
-    assert!(types.contains(&&AuditEventType::AgentCompleted));
-
-    // Negative control: status for an unknown session errors.
-    assert!(manager.status("session-unknown").is_err());
-}
+// Agent-session behavior is covered without a Tauri runtime by unit tests
+// close to the code: the process lifecycle (start → active → stop → stopped,
+// idempotent stop) in src/process/manager.rs, and the lifecycle→audit wiring
+// in src/commands/agent.rs. Spawning the real sidecar is the #11 live check.
