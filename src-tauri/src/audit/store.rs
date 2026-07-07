@@ -122,6 +122,23 @@ impl FileSystemAuditStore {
             .collect())
     }
 
+    /// Returns the most recent `limit` events, newest first, across all
+    /// audit files.
+    ///
+    /// Events are stored chronologically (by day-file name, then append
+    /// order within a file), so "most recent" is the tail of the full
+    /// history; this reverses that tail so the newest event is first —
+    /// the order an audit viewer wants to show. A `limit` of 0 returns an
+    /// empty list. Malformed lines are skipped (see `read_all_events`).
+    pub fn get_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, AuditError> {
+        let (mut events, _malformed) = self.read_all_events()?;
+        // Keep only the last `limit` in chronological order, then reverse
+        // so the newest event leads.
+        let start = events.len().saturating_sub(limit);
+        let recent = events.split_off(start);
+        Ok(recent.into_iter().rev().collect())
+    }
+
     /// Returns the list of malformed JSONL lines encountered when
     /// reading the audit history. Each record carries the file path,
     /// 1-indexed line number, and parse-error string so callers (audit
@@ -557,6 +574,39 @@ mod tests {
             .unwrap();
 
         assert!(store.corruption_report().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_recent_returns_newest_first_and_handles_boundary_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+        for i in 0..3 {
+            store
+                .log(&test_event(
+                    &format!("evt-{i}"),
+                    "session-1",
+                    "agent-1",
+                    AuditEventType::ToolInvoked,
+                ))
+                .unwrap();
+        }
+
+        // limit 0 → empty (documented boundary).
+        assert!(store.get_recent(0).unwrap().is_empty());
+
+        // limit < history → the newest `limit`, newest first.
+        let two = store.get_recent(2).unwrap();
+        assert_eq!(
+            two.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["evt-2", "evt-1"]
+        );
+
+        // limit > history → all events, newest first, no panic.
+        let all = store.get_recent(100).unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["evt-2", "evt-1", "evt-0"]
+        );
     }
 
     #[test]

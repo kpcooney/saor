@@ -104,6 +104,38 @@ impl SqliteMemoryStore {
         Ok(entry)
     }
 
+    /// Keyword-searches memory entries via FTS5, ranked by BM25 relevance
+    /// (most relevant first), limited to `limit` results. A thin wrapper over
+    /// [`crate::memory::fts::keyword_search`] so callers use the store as a
+    /// single surface rather than reaching for its connection.
+    pub fn search(&self, query: &str, limit: i64) -> Result<Vec<MemoryEntry>, MemoryError> {
+        super::fts::keyword_search(&self.conn, query, limit)
+    }
+
+    /// Registers a project row in this database's `projects` table.
+    ///
+    /// Memory entries carry a `project_id` foreign key into `projects`
+    /// (with `PRAGMA foreign_keys = ON`), so the owning project must exist
+    /// here before any entry can be written. The canonical project record
+    /// lives in the app-level registry (see `project::registry`); this row
+    /// exists only to satisfy the local foreign key. `INSERT OR IGNORE`
+    /// keeps the call idempotent — re-registering an existing project is a
+    /// no-op, matching the idempotent schema initialization.
+    pub fn register_project(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+        created_at: &str,
+    ) -> Result<(), MemoryError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, description, created_at, config)
+             VALUES (?1, ?2, ?3, ?4, '{}')",
+            params![id, name, description, created_at],
+        )?;
+        Ok(())
+    }
+
     /// Returns a reference to the underlying connection. Used by the
     /// FTS5 search module to run search queries against the same database.
     pub(crate) fn connection(&self) -> &Connection {

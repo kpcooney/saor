@@ -11,186 +11,53 @@
 //   identity/   — AgentIdentity types and scope validation
 //   references/ — URI scheme resolver for agent reference manifests
 //   process/    — Agent sidecar process lifecycle management
+//   project/    — App-level registry of known projects
+//   commands/   — Tauri IPC command handlers (thin wrappers over the above)
 //
 // See src-tauri/README.md for the full responsibility breakdown.
 // See docs/architecture/sdlc-agent-architecture-research-v4.md Section 2.3
 // for the IPC communication flow between frontend, Rust, and agent layer.
 
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tauri::Manager;
+
 pub mod audit;
+pub mod commands;
 pub mod identity;
 pub mod memory;
 pub mod process;
+pub mod project;
 pub mod references;
 
-// Scaffold command from Tauri template — will be replaced with real commands
-// as Phase 1 modules are implemented.
+use process::manager::AgentProcessManager;
+use process::spawner::TauriAgentSpawner;
+use project::ProjectRegistry;
+
+/// Resolves the path to the agent layer's entrypoint script that the process
+/// manager launches with `node`.
+///
+/// `SAOR_AGENT_ENTRY` overrides it; otherwise it defaults to
+/// `<repo>/agents/dist/sidecar.js`, resolved from this crate's manifest
+/// directory (`src-tauri`). Bundling the entrypoint for a packaged app is
+/// future work — in development the agent layer is run from its `dist/` build.
+fn agent_entry_path() -> PathBuf {
+    if let Ok(explicit) = std::env::var("SAOR_AGENT_ENTRY") {
+        return PathBuf::from(explicit);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|repo_root| repo_root.join("agents").join("dist").join("sidecar.js"))
+        .unwrap_or_else(|| PathBuf::from("agents/dist/sidecar.js"))
+}
+
+/// Scaffold smoke command retained until the real UI (issue #13) replaces the
+/// template `+page.svelte`, which still calls it. Not part of the Phase 1
+/// command surface.
 #[tauri::command]
 fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-/// Verification command: spawns a Node.js subprocess, captures its output,
-/// and waits for it to exit. Confirms the Tauri shell plugin can spawn and
-/// communicate with child processes via stdio — the pattern the agent layer
-/// will use.
-///
-/// This command is temporary — it exists to verify the sidecar pattern
-/// (Issue #3) and will be replaced by the real AgentProcessManager.
-///
-/// See docs/verification/003-tauri-sidecar-verification.md for findings.
-#[tauri::command]
-async fn verify_sidecar(app: tauri::AppHandle) -> Result<String, String> {
-    use tauri_plugin_shell::ShellExt;
-    use tauri_plugin_shell::process::CommandEvent;
-
-    // Spawn node to evaluate a simple script that prints to stdout and exits
-    let command = app
-        .shell()
-        .command("node")
-        .args([
-            "-e",
-            r#"
-                console.log(JSON.stringify({ status: "started", pid: process.pid }));
-                setTimeout(() => {
-                    console.log(JSON.stringify({ status: "heartbeat", uptime_ms: 100 }));
-                }, 100);
-                setTimeout(() => {
-                    console.log(JSON.stringify({ status: "completed" }));
-                }, 200);
-            "#,
-        ]);
-
-    let (mut rx, child) = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
-
-    let mut lines: Vec<String> = Vec::new();
-    let child_pid = child.pid();
-
-    // Collect stdout lines from the spawned process
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) => {
-                let line = String::from_utf8_lossy(&bytes).to_string();
-                lines.push(line);
-            }
-            CommandEvent::Stderr(bytes) => {
-                let line = String::from_utf8_lossy(&bytes).to_string();
-                lines.push(format!("[stderr] {line}"));
-            }
-            CommandEvent::Terminated(payload) => {
-                lines.push(format!(
-                    "Process exited: code={:?}, signal={:?}",
-                    payload.code, payload.signal
-                ));
-                break;
-            }
-            CommandEvent::Error(err) => {
-                lines.push(format!("[error] {err}"));
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    let result = format!(
-        "Sidecar verification complete.\nChild PID: {}\nCaptured {} lines:\n{}",
-        child_pid,
-        lines.len(),
-        lines.join("\n")
-    );
-
-    Ok(result)
-}
-
-/// Verification command: spawns a long-running Node.js process and kills it
-/// after collecting a few heartbeat messages. Confirms clean process
-/// termination without zombie processes.
-///
-/// Temporary — part of Issue #3 sidecar verification.
-#[tauri::command]
-async fn verify_sidecar_kill(app: tauri::AppHandle) -> Result<String, String> {
-    use tauri_plugin_shell::ShellExt;
-    use tauri_plugin_shell::process::CommandEvent;
-
-    // Spawn a process that runs indefinitely (prints heartbeats every 100ms)
-    let command = app
-        .shell()
-        .command("node")
-        .args([
-            "-e",
-            r#"
-                console.log(JSON.stringify({ status: "started", pid: process.pid }));
-                const interval = setInterval(() => {
-                    console.log(JSON.stringify({ status: "heartbeat" }));
-                }, 100);
-                process.on("SIGTERM", () => {
-                    clearInterval(interval);
-                    console.log(JSON.stringify({ status: "received_sigterm" }));
-                    process.exit(0);
-                });
-            "#,
-        ]);
-
-    let (mut rx, child) = command.spawn().map_err(|e| format!("Failed to spawn: {e}"))?;
-
-    let child_pid = child.pid();
-    let mut lines: Vec<String> = Vec::new();
-
-    // Collect a few messages before killing
-    let mut message_count = 0;
-    let mut should_kill = false;
-    loop {
-        match rx.recv().await {
-            Some(CommandEvent::Stdout(bytes)) => {
-                let line = String::from_utf8_lossy(&bytes).to_string();
-                lines.push(line);
-                message_count += 1;
-                if message_count >= 3 {
-                    should_kill = true;
-                    break;
-                }
-            }
-            Some(CommandEvent::Error(err)) => {
-                lines.push(format!("[error] {err}"));
-                break;
-            }
-            None => break,
-            _ => {}
-        }
-    }
-
-    // Kill the process after collecting enough messages. kill() takes
-    // ownership of child, so it must happen outside the recv loop.
-    if should_kill {
-        child.kill().map_err(|e| format!("Failed to kill: {e}"))?;
-        lines.push("Sent kill signal".to_string());
-
-        // Drain remaining events until process terminates
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Terminated(payload) => {
-                    lines.push(format!(
-                        "Process terminated: code={:?}, signal={:?}",
-                        payload.code, payload.signal
-                    ));
-                    break;
-                }
-                CommandEvent::Stdout(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes).to_string();
-                    lines.push(line);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let result = format!(
-        "Kill verification complete.\nChild PID: {}\nCaptured {} events:\n{}",
-        child_pid,
-        lines.len(),
-        lines.join("\n")
-    );
-
-    Ok(result)
+    format!("Hello, {name}! You've been greeted from Rust!")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -198,10 +65,40 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            let handle = app.handle();
+
+            // Open (or create) the app-level project registry in the Tauri
+            // app-data directory and manage it as shared state.
+            let data_dir = handle
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("failed to resolve app data directory: {e}"))?;
+            let registry = ProjectRegistry::open(&data_dir.join("registry.db"))
+                .map_err(|e| format!("failed to open project registry: {e}"))?;
+            app.manage(Mutex::new(registry));
+
+            // Build the agent process manager backed by the real Tauri-shell
+            // spawner and manage it as shared state.
+            let spawner = TauriAgentSpawner::new(handle.clone(), agent_entry_path());
+            app.manage(Mutex::new(AgentProcessManager::new(Box::new(spawner))));
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
-            verify_sidecar,
-            verify_sidecar_kill
+            commands::project::create_project,
+            commands::project::get_project,
+            commands::project::list_projects,
+            commands::memory::memory_write,
+            commands::memory::memory_search,
+            commands::memory::memory_read,
+            commands::audit::audit_get_by_session,
+            commands::audit::audit_get_by_agent,
+            commands::audit::audit_get_recent,
+            commands::agent::agent_start,
+            commands::agent::agent_status,
+            commands::agent::agent_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
