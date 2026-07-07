@@ -24,6 +24,10 @@ build/
 # /review-branch and consumed by /re-review-branch. See ADR-005.
 .claude/review-state/
 
+# Local dev-server launch config (created by the preview tooling;
+# per-developer, not part of the project's shared config).
+.claude/launch.json
+
 # Tauri
 *.dmg
 *.AppImage
