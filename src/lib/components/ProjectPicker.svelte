@@ -11,6 +11,9 @@
    * is enforced by `create_project`, whose error string we surface inline. A
    * dedicated real-time validation IPC is deferred (Phase 1 scope).
    */
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { homeDir } from "@tauri-apps/api/path";
+
   import { createProject, listProjects } from "$lib/tauri";
   import { formatTimestamp } from "$lib/format";
   import { projectStore } from "$lib/stores/project.svelte";
@@ -61,6 +64,27 @@
     }
   }
 
+  /**
+   * Opens the native folder picker (Finder on macOS), defaulting to the user's
+   * home directory, and puts the chosen folder in the path field. The input
+   * stays editable, so a path can still be typed or pasted as a fallback.
+   */
+  async function browse() {
+    createError = null;
+    try {
+      const home = await homeDir();
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: home,
+        title: "Choose a project folder",
+      });
+      if (typeof selected === "string") path = selected;
+    } catch (e) {
+      createError = String(e);
+    }
+  }
+
   $effect(() => {
     load();
   });
@@ -100,7 +124,10 @@
       </label>
       <label>
         Path <span class="req">*</span>
-        <input bind:value={path} placeholder="/absolute/path/to/project" required />
+        <div class="path-row">
+          <input bind:value={path} placeholder="Choose a folder…" required />
+          <button type="button" class="browse" onclick={browse}>Browse…</button>
+        </div>
       </label>
       <label>
         Description
@@ -165,6 +192,17 @@
   }
   .req {
     color: #d33;
+  }
+  .path-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .path-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .browse {
+    white-space: nowrap;
   }
   @media (max-width: 720px) {
     .picker {
