@@ -1,6 +1,6 @@
 # 006 — Where Tool-Call Audit Events Are Emitted
 
-**Status**: proposed
+**Status**: accepted
 
 ## Context
 
