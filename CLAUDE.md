@@ -65,7 +65,7 @@ Favor readable code over clever code, and document where it adds value. The cros
 
 - **Rust**: standard `rustfmt` / `clippy`. Minimal surface — storage, process management, IPC only. See [rust.md](standards/coding-standards/rust.md).
 - **TypeScript**: strict mode, ESLint + Prettier, interfaces over type aliases for public contracts. See [typescript.md](standards/coding-standards/typescript.md).
-- **Svelte**: Svelte 5 runes (`$state`, `$derived`, `$effect`); prefer stores for shared state; keep components small (~150 lines max).
+- **Svelte**: Svelte 5 runes (`$state`, `$derived`, `$effect`); prefer stores for shared state; prefer small, focused components — split by cohesion (a component taking on more than one responsibility) rather than a line count.
 
 ## Testing & Review-Truth
 
