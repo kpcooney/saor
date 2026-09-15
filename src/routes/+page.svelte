@@ -10,6 +10,7 @@
   import AgentDashboard from "$lib/components/AgentDashboard.svelte";
   import MemoryInspector from "$lib/components/MemoryInspector.svelte";
   import AuditViewer from "$lib/components/AuditViewer.svelte";
+  import { agentStatus } from "$lib/tauri";
   import { projectStore } from "$lib/stores/project.svelte";
 
   type Tab = "agents" | "memory" | "audit";
@@ -20,6 +21,9 @@
     { id: "audit", label: "Audit" },
   ];
 
+  /** How often to refresh the status of active agent sessions. */
+  const POLL_MS = 2000;
+
   let tab = $state<Tab>("agents");
 
   const project = $derived(projectStore.active);
@@ -28,6 +32,36 @@
     projectStore.close();
     tab = "agents";
   }
+
+  // Poll active agent sessions while a project is open. This lives in the shell
+  // rather than AgentDashboard so it keeps running across tab switches (the tab
+  // components mount/unmount). The effect depends only on the active project, so
+  // it isn't torn down on every status update; each cycle reads the current
+  // sessions lazily. Cycles are self-scheduled (setTimeout, not setInterval), so
+  // a slow round of status calls can't overlap with the next.
+  $effect(() => {
+    if (!projectStore.active) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function tick() {
+      for (const session of projectStore.sessions) {
+        if (cancelled) return;
+        if (session.status !== "active") continue;
+        try {
+          const status = await agentStatus(session.sessionId);
+          projectStore.setSessionStatus(session.sessionId, status);
+        } catch {
+          // Transient status-read failure; the next cycle retries.
+        }
+      }
+      if (!cancelled) timer = setTimeout(tick, POLL_MS);
+    }
+    timer = setTimeout(tick, POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  });
 </script>
 
 <main>

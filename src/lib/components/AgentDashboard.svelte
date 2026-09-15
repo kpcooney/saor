@@ -3,17 +3,18 @@
    * AgentDashboard — start a Code Agent against the active project, watch its
    * status, and stop it. Sessions are held in the shared store (the backend
    * has no session-list command in Phase 1), so this view shows the sessions
-   * started during the current UI session and polls each active one's status.
+   * started during the current UI session.
+   *
+   * Status polling of active sessions lives in the app shell (+page.svelte),
+   * not here, so it keeps running while the user is on the Memory or Audit tab
+   * (this component is unmounted whenever another tab is selected).
    */
-  import { agentStart, agentStatus, agentStop } from "$lib/tauri";
+  import { agentStart, agentStop } from "$lib/tauri";
   import { formatTimestamp } from "$lib/format";
   import { projectStore } from "$lib/stores/project.svelte";
 
   /** The only agent type wired up in Phase 1. */
   const AGENT_TYPE = "code-agent";
-
-  /** How often to refresh the status of active sessions. */
-  const POLL_MS = 2000;
 
   let task = $state("");
   let starting = $state(false);
@@ -22,7 +23,6 @@
 
   const project = $derived(projectStore.active);
   const sessions = $derived(projectStore.sessions);
-  const hasActive = $derived(sessions.some((s) => s.status === "active"));
   const canStart = $derived(task.trim().length > 0 && !starting);
 
   async function start(event: Event) {
@@ -58,24 +58,6 @@
       stopErrors = { ...stopErrors, [sessionId]: String(e) };
     }
   }
-
-  // Poll the status of every active session while any are running. The
-  // interval is torn down and re-created by the effect when `hasActive` flips.
-  $effect(() => {
-    if (!hasActive) return;
-    const timer = setInterval(async () => {
-      for (const session of projectStore.sessions) {
-        if (session.status !== "active") continue;
-        try {
-          const status = await agentStatus(session.sessionId);
-          projectStore.setSessionStatus(session.sessionId, status);
-        } catch {
-          // Transient status-read failure; next tick retries.
-        }
-      }
-    }, POLL_MS);
-    return () => clearInterval(timer);
-  });
 </script>
 
 <div class="dashboard">

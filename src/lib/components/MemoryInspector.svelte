@@ -4,9 +4,18 @@
    * memory store. Renders distinct empty and error states as required by the
    * issue's acceptance criteria.
    *
-   * A blank query is never sent to the backend: FTS5 raises a syntax error on
-   * an empty MATCH, so a blank box shows the "No memory entries yet." empty
-   * state and clears results instead of searching.
+   * The box is a plain keyword field, so its raw text is turned into a safe
+   * FTS5 query before it reaches the backend (`toFtsQuery`): each alphanumeric
+   * token is quoted and the tokens are AND-ed together. This keeps punctuation
+   * and FTS operators a user might type out of FTS5's parser (which would raise
+   * a syntax error), and a query with no usable tokens — blank, or all
+   * punctuation — short-circuits to the empty state without a backend call (an
+   * empty FTS MATCH is itself a syntax error). The lower-level
+   * `memory::keyword_search` still accepts raw FTS syntax for callers that want it.
+   *
+   * Searches are generation-guarded: each run captures a sequence number and
+   * applies its result only if it is still the latest, so a slow in-flight
+   * search can't overwrite the results of a newer query or a cleared box.
    */
   import { memorySearch } from "$lib/tauri";
   import { formatTimestamp, preview } from "$lib/format";
@@ -22,31 +31,52 @@
 
   const project = $derived(projectStore.active);
 
-  async function run(q: string) {
+  // Monotonic id of the most recent search; a response whose id no longer
+  // matches is stale (a newer query started, or the box was cleared) and is
+  // discarded rather than applied.
+  let latest = 0;
+
+  /**
+   * Builds a safe FTS5 MATCH string from free-text input: quote each
+   * alphanumeric token and AND them with spaces. Returns "" when there are no
+   * usable tokens, which the caller treats as "don't search".
+   */
+  function toFtsQuery(raw: string): string {
+    const tokens = raw.match(/[\p{L}\p{N}_]+/gu);
+    return tokens ? tokens.map((t) => `"${t}"`).join(" ") : "";
+  }
+
+  async function run(ftsQuery: string, id: number) {
     if (!project) return;
     loading = true;
     error = null;
     try {
-      results = await memorySearch(project.id, q);
+      const found = await memorySearch(project.id, ftsQuery);
+      if (id !== latest) return;
+      results = found;
     } catch (e) {
+      if (id !== latest) return;
       error = String(e);
     } finally {
-      loading = false;
+      if (id === latest) loading = false;
     }
   }
 
   // Debounce searches: re-run `run` a short delay after `query` settles. The
   // effect reads `query` (tracked) so it re-schedules on every keystroke and
-  // cancels the pending timer on cleanup. A blank query short-circuits to the
-  // empty state without a backend call (empty FTS MATCH is a syntax error).
+  // cancels the pending timer on cleanup. Bumping `latest` on every run also
+  // invalidates any in-flight search, so clearing the box (or typing a newer
+  // query) can't be overwritten by a late response.
   $effect(() => {
-    const q = query.trim();
-    if (!q) {
+    const id = ++latest;
+    const fts = toFtsQuery(query);
+    if (!fts) {
       results = [];
       error = null;
+      loading = false;
       return;
     }
-    const timer = setTimeout(() => run(q), DEBOUNCE_MS);
+    const timer = setTimeout(() => run(fts, id), DEBOUNCE_MS);
     return () => clearTimeout(timer);
   });
 </script>
@@ -61,7 +91,7 @@
 
   {#if error}
     <p class="error">Failed to load memory. {error}</p>
-    <button type="button" onclick={() => run(query)}>Retry</button>
+    <button type="button" onclick={() => run(toFtsQuery(query), ++latest)}>Retry</button>
   {:else if loading && results.length === 0}
     <p class="muted">Searching…</p>
   {:else if results.length === 0}
