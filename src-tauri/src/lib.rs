@@ -52,17 +52,10 @@ fn agent_entry_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agents/dist/sidecar.js"))
 }
 
-/// Scaffold smoke command retained until the real UI (issue #13) replaces the
-/// template `+page.svelte`, which still calls it. Not part of the Phase 1
-/// command surface.
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {name}! You've been greeted from Rust!")
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -86,7 +79,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             commands::project::create_project,
             commands::project::get_project,
             commands::project::list_projects,
