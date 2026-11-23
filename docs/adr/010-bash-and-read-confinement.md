@@ -58,7 +58,7 @@ These are stated in the module headers as well, so the code no longer claims mor
 1. **New top-level entries.** The deny list is built from what exists at launch. A Bash command can still *create* a new file or directory directly in the project root, or directly in a directory that is only an ancestor of a writable root (a new `src-tauri/notes.txt` when only `src-tauri/src/**` is in scope). It cannot touch anything that already existed out of scope.
 2. **Directory granularity for Bash.** `agents/src/**/*.ts` makes all of `agents/src` writable to Bash. The exact glob still applies to `Write` and `Edit`.
 3. **Bash reads are a deny list.** Outside the protected paths, a command can read whatever the user account can. Combined with no network access this limits exfiltration to what the agent can place in memory, the audit trail, or its own output.
-4. **`.git` is not writable.** It is outside the Code Agent's file scope, so Bash cannot commit or switch branches. That is consistent with the declared scope, and is the starting point for the branch-scope decision in issue #58.
+4. **`.git` is not writable by default.** It is outside the Code Agent's file scope. [ADR-011](011-branch-scope-enforcement.md) opens it — partially, and only on an in-scope branch — so the agent can commit.
 5. **Violation auditing is macOS-only.** On Linux a blocked operation still fails and still appears in the command's `tool.completed` event, but the SDK reports no violation detail, so no `scope.violation` event is produced.
 6. **Linux skips glob rules.** The SDK cannot apply glob patterns to bubblewrap writes; the generated deny list is literal paths for that reason. Protected-path read globs are expanded to existing files at launch on Linux.
 
@@ -82,7 +82,7 @@ These are stated in the module headers as well, so the code no longer claims mor
 **Neutral / notable:**
 
 - **No change to the identity schema.** `AgentScope` is untouched; read scope is uniform and the build-output directories are a module constant. A per-agent read scope can be added later if an agent needs to be narrower.
-- **`scope.branches` is still unenforced** — tracked by issue #58, which builds on limit 4.
+- **`scope.branches`** is enforced separately; see [ADR-011](011-branch-scope-enforcement.md).
 - **Windows** has no supported sandbox, so agents there run without Bash.
 
 ## References
