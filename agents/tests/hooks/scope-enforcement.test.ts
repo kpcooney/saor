@@ -18,6 +18,8 @@ import {
   evaluateToolCall,
   fileIsInScope,
   isCredentialExpired,
+  extractReadTargets,
+  isProtectedPath,
   matchesGlob,
   type ScopeViolation,
 } from '../../src/hooks/scope-enforcement.js';
@@ -144,6 +146,7 @@ describe('evaluateToolCall — file scope', () => {
   it('does not apply file-scope checks to non-mutating tools', () => {
     // Read is allowlisted and not file-mutating, so a path outside the file
     // globs is irrelevant — only Write/Edit are constrained by file scope.
+    // (Reads have their own, wider scope: see the read-scope tests below.)
     const decision = evaluateToolCall({
       identity: identityWith(),
       toolName: 'Read',
@@ -187,7 +190,7 @@ describe('evaluateToolCall — credential expiry', () => {
     const decision = evaluateToolCall({
       identity: identityWith({}, FUTURE),
       toolName: 'Read',
-      toolInput: {},
+      toolInput: { file_path: 'agents/src/index.ts' },
       now: NOW,
     });
 
@@ -198,7 +201,7 @@ describe('evaluateToolCall — credential expiry', () => {
     const decision = evaluateToolCall({
       identity: identityWith({}, PAST),
       toolName: 'Read',
-      toolInput: {},
+      toolInput: { file_path: 'agents/src/index.ts' },
       now: NOW,
     });
 
@@ -336,7 +339,7 @@ describe('createScopeEnforcementHook', () => {
     });
 
     const result = await hook(
-      preToolUseInput('Read', {}),
+      preToolUseInput('Read', { file_path: 'agents/src/index.ts' }),
       'tool-use-1',
       HOOK_OPTIONS,
     );
@@ -458,7 +461,7 @@ describe('evaluateToolCall — defense-in-depth on a corrupted identity', () => 
     const decision = evaluateToolCall({
       identity: corruptedIdentity,
       toolName: 'Read',
-      toolInput: {},
+      toolInput: { file_path: 'agents/src/index.ts' },
       now: NOW,
     });
 
@@ -508,5 +511,185 @@ describe('evaluateToolCall — file scope covers all file-mutating tools', () =>
     });
 
     expect(decision.action).toBe('allow');
+  });
+});
+
+// --- Read scope (issue #56) -------------------------------------------------
+
+const PROJECT_ROOT = '/workspace/saor';
+
+function readDecision(toolName: string, toolInput: unknown, tools = ['Read', 'Grep', 'Glob']) {
+  return evaluateToolCall({
+    identity: identityWith({ tools }),
+    toolName,
+    toolInput,
+    now: NOW,
+    cwd: PROJECT_ROOT,
+  });
+}
+
+function expectReadBlocked(decision: ReturnType<typeof readDecision>, reason: string): void {
+  expect(decision.action).toBe('block');
+  if (decision.action !== 'block') return;
+  expect(decision.violation.eventType).toBe('scope.violation');
+  expect(decision.violation.reason).toBe(reason);
+}
+
+const OUTSIDE = 'Read target is outside the project';
+const PROTECTED = 'Read target is a protected path';
+
+describe('evaluateToolCall — read scope', () => {
+  it('allows reading any ordinary project file, in or out of the write scope', () => {
+    for (const filePath of [
+      'agents/src/index.ts',
+      'docs/adr/001-audit-store-scoping.md',
+      `${PROJECT_ROOT}/README.md`,
+    ]) {
+      expect(readDecision('Read', { file_path: filePath }).action).toBe('allow');
+    }
+  });
+
+  it('blocks a Read outside the project root', () => {
+    for (const filePath of [
+      '/etc/passwd',
+      '../../.env',
+      '/Users/someone/.ssh/id_rsa',
+      `${PROJECT_ROOT}/../other-repo/secrets.txt`,
+      'src/../../outside.txt',
+    ]) {
+      expectReadBlocked(readDecision('Read', { file_path: filePath }), OUTSIDE);
+    }
+  });
+
+  it('blocks a Read of a protected path inside the project', () => {
+    for (const filePath of [
+      '.env',
+      '.env.local',
+      'agents/.env',
+      '.claude/settings.local.json',
+      '.sdlc/memory.db',
+      `${PROJECT_ROOT}/.sdlc/audit/2026-06-01.jsonl`,
+    ]) {
+      expectReadBlocked(readDecision('Read', { file_path: filePath }), PROTECTED);
+    }
+    // Negative control: look-alike names that are not protected stay readable.
+    for (const filePath of ['.envrc', 'docs/env.md', '.claude/settings.json']) {
+      expect(readDecision('Read', { file_path: filePath }).action).toBe('allow');
+    }
+  });
+
+  it('blocks a Read that names no file (fail closed)', () => {
+    const decision = readDecision('Read', {});
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.reason).toBe('File-reading tool call is missing its target path');
+  });
+
+  it('holds Grep to the project: its default root is allowed, an outside path is not', () => {
+    expect(readDecision('Grep', { pattern: 'TODO' }).action).toBe('allow');
+    expect(readDecision('Grep', { pattern: 'TODO', path: 'agents/src' }).action).toBe('allow');
+    expectReadBlocked(readDecision('Grep', { pattern: 'BEGIN', path: '/Users/someone/.ssh' }), OUTSIDE);
+    expectReadBlocked(readDecision('Grep', { pattern: 'KEY', path: '.sdlc' }), PROTECTED);
+  });
+
+  it('checks where a Glob pattern points, not just its path parameter', () => {
+    expect(readDecision('Glob', { pattern: '**/*.ts' }).action).toBe('allow');
+    expect(readDecision('Glob', { pattern: 'agents/src/**/*.ts' }).action).toBe('allow');
+    expectReadBlocked(readDecision('Glob', { pattern: '/etc/**' }), OUTSIDE);
+    expectReadBlocked(readDecision('Glob', { pattern: '/*' }), OUTSIDE);
+    expectReadBlocked(readDecision('Glob', { pattern: '../**/*.md' }), OUTSIDE);
+    expectReadBlocked(readDecision('Glob', { pattern: '*.md', path: '/tmp' }), OUTSIDE);
+    expectReadBlocked(readDecision('Glob', { pattern: '.sdlc/**' }), PROTECTED);
+    expectReadBlocked(readDecision('Glob', { pattern: '**', path: '.sdlc/audit' }), PROTECTED);
+  });
+
+  it('treats an absolute read path as outside when no project root is known', () => {
+    const decision = evaluateToolCall({
+      identity: identityWith(),
+      toolName: 'Read',
+      toolInput: { file_path: `${PROJECT_ROOT}/README.md` },
+      now: NOW,
+    });
+    expect(decision.action).toBe('block');
+  });
+
+  it('checks read scope before the tool allowlist, like file scope', () => {
+    // Even for an agent not granted Read, an outside read is reported as the
+    // scope violation it is.
+    const decision = readDecision('Read', { file_path: '/etc/passwd' }, ['Write']);
+    expectReadBlocked(decision, OUTSIDE);
+  });
+});
+
+describe('extractReadTargets / isProtectedPath', () => {
+  it('names the targets of each file-reading tool', () => {
+    expect(extractReadTargets('Read', { file_path: 'a.ts' })).toEqual(['a.ts']);
+    expect(extractReadTargets('Read', { file_path: '' })).toBeUndefined();
+    expect(extractReadTargets('Grep', { pattern: 'x' })).toEqual(['.']);
+    expect(extractReadTargets('Grep', { pattern: 'x', path: 'src' })).toEqual(['src']);
+    expect(extractReadTargets('Glob', { pattern: 'src/**/*.ts' })).toEqual(['.', 'src']);
+    expect(extractReadTargets('Glob', { pattern: '*.ts', path: 'src' })).toEqual(['src']);
+    expect(extractReadTargets('Glob', { pattern: 'lib/*.ts', path: 'src' })).toEqual([
+      'src',
+      'src/lib',
+    ]);
+  });
+
+  it('recognizes protected project paths', () => {
+    expect(isProtectedPath('.sdlc')).toBe(true);
+    expect(isProtectedPath('.sdlc/memory.db')).toBe(true);
+    expect(isProtectedPath('packages/api/.env.production')).toBe(true);
+    expect(isProtectedPath('src/env.ts')).toBe(false);
+  });
+});
+
+// --- Bash requires the OS sandbox (issue #56) ---------------------------------
+
+describe('evaluateToolCall — Bash sandbox requirement', () => {
+  const bashIdentity = () => identityWith({ tools: ['Read', 'Bash'] });
+  const bashCall = { command: 'echo x > docs/notes.md' };
+
+  it('allows Bash when the caller attests the OS sandbox is active', () => {
+    const decision = evaluateToolCall({
+      identity: bashIdentity(),
+      toolName: 'Bash',
+      toolInput: bashCall,
+      now: NOW,
+      isBashSandboxed: true,
+    });
+    expect(decision.action).toBe('allow');
+  });
+
+  it('blocks an allowlisted Bash when the sandbox is absent or unstated', () => {
+    for (const isBashSandboxed of [false, undefined]) {
+      const decision = evaluateToolCall({
+        identity: bashIdentity(),
+        toolName: 'Bash',
+        toolInput: bashCall,
+        now: NOW,
+        ...(isBashSandboxed !== undefined ? { isBashSandboxed } : {}),
+      });
+      expect(decision.action).toBe('block');
+      if (decision.action !== 'block') return;
+      expect(decision.violation.eventType).toBe('tool.blocked');
+      expect(decision.violation.reason).toContain('OS sandbox');
+    }
+  });
+
+  it('records the blocked Bash attempt through the hook', async () => {
+    const { logger, events } = recordingLogger();
+    const hook = createScopeEnforcementHook({
+      identity: bashIdentity(),
+      auditLogger: logger,
+      projectId: 'proj-1',
+      isBashSandboxed: false,
+      now: () => NOW,
+    });
+
+    const result = await hook(preToolUseInput('Bash', bashCall), 'tool-use-1', HOOK_OPTIONS);
+
+    expect(result.hookSpecificOutput).toMatchObject({ permissionDecision: 'deny' });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.eventType).toBe('tool.blocked');
   });
 });

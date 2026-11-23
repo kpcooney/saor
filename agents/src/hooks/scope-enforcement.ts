@@ -2,9 +2,28 @@
  * agents/src/hooks/scope-enforcement.ts
  *
  * PreToolUse hook that enforces agent scope before every tool invocation.
- * If an agent attempts to write a file outside its allowed glob patterns,
- * invoke a tool not on its allowlist, or act after its credential has expired,
- * this hook blocks the action and logs a security event to the audit trail.
+ * If an agent attempts to write a file outside its allowed glob patterns, read
+ * outside its read scope, invoke a tool not on its allowlist, run `Bash`
+ * without an OS sandbox, or act after its credential has expired, this hook
+ * blocks the action and logs a security event to the audit trail.
+ *
+ * What this hook confines, and what it leaves to another layer:
+ *
+ *   - `Write` / `Edit` / `MultiEdit` / `NotebookEdit` — the target file must
+ *     match the agent's file-scope globs. Enforced here.
+ *   - `Read` / `Grep` / `Glob` — the target must be inside the project root and
+ *     must not be a protected path (see ../sandbox/protected-paths.ts).
+ *     Enforced here, for the target each call names. A `Grep` or `Glob` over a
+ *     directory is checked by that directory, not by every file beneath it;
+ *     the SDK's `Read(...)` deny rules registered alongside this hook (see
+ *     ../definitions/code-agent.ts) are what keep protected files out of such
+ *     a search.
+ *   - `Bash` — NOT path-checked here. A shell command can read or write files
+ *     in more ways than a parser can catch, so Bash is confined by the OS
+ *     sandbox configured in ../sandbox/bash-sandbox.ts. This hook's part is to
+ *     refuse Bash entirely unless the caller attests that sandbox is in place.
+ *
+ * `scope.branches` is not enforced by this hook.
  *
  * The module is split into two layers:
  *
@@ -17,11 +36,13 @@
  *     to the SDK's permission-decision output.
  *
  * Blocking is the default — the check order follows the architecture (file
- * scope, then tool allowlist, then expiry), and any of the three failing
- * denies the tool call.
+ * scope, then tool allowlist, then expiry), with the read-scope check alongside
+ * file scope and the Bash sandbox check alongside the allowlist. Any check
+ * failing denies the tool call.
  *
  * See docs/architecture/sdlc-agent-architecture-research-v4.md Section 7.4
- * for the scope enforcement logic and hook registration pattern.
+ * for the scope enforcement logic and hook registration pattern, and
+ * docs/adr/010-bash-and-read-confinement.md for the read and Bash decisions.
  */
 
 import { posix as posixPath } from 'node:path';
@@ -34,6 +55,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 
 import type { AgentIdentity } from '../identity/types.js';
+import { PROTECTED_PROJECT_GLOBS } from '../sandbox/protected-paths.js';
 import type { AuditEvent, AuditEventType, AuditLogger } from './audit-logger.js';
 
 /**
@@ -52,6 +74,17 @@ const FILE_MUTATING_TOOLS: readonly string[] = [
   'MultiEdit',
   'NotebookEdit',
 ];
+
+/**
+ * Tools whose read target is checked against the agent's read scope: it must
+ * be inside the project root and must not be a protected path. When a new
+ * file-reading tool is granted to an agent, add it here and teach
+ * `extractReadTargets` where its target lives.
+ */
+const PATH_READING_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob'];
+
+/** The shell tool, which is confined by the OS sandbox rather than this hook. */
+const BASH_TOOL = 'Bash';
 
 /**
  * A scope-enforcement denial. The `eventType` is one of the three security
@@ -81,7 +114,10 @@ export type ScopeDecision =
 export interface ScopeEvaluationInput {
   readonly identity: AgentIdentity;
   readonly toolName: string;
-  /** The raw tool input; only `file_path` is inspected, for file-mutating tools. */
+  /**
+   * The raw tool input. Only the path parameters are inspected: the write
+   * target of file-mutating tools and the read target of file-reading tools.
+   */
   readonly toolInput: unknown;
   /** Current time, for the expiry check. Defaults to `new Date()`. */
   readonly now?: Date;
@@ -91,6 +127,12 @@ export interface ScopeEvaluationInput {
    * scope (fail closed).
    */
   readonly cwd?: string;
+  /**
+   * Whether `Bash` commands run inside the OS sandbox. Only `true` lets a Bash
+   * call through; when omitted or `false`, Bash is denied even if it is on the
+   * agent's tool allowlist, because nothing else confines what it writes.
+   */
+  readonly isBashSandboxed?: boolean;
 }
 
 const ALLOW: ScopeDecision = { action: 'allow' };
@@ -100,7 +142,8 @@ const ALLOW: ScopeDecision = { action: 'allow' };
  * audit dependency — returns an allow/block decision the caller acts on.
  *
  * Check order matches the architecture (Section 7.4): file scope for
- * file-mutating tools, then the tool allowlist, then credential expiry.
+ * file-mutating tools (and read scope for file-reading tools), then the tool
+ * allowlist (and the Bash sandbox requirement), then credential expiry.
  */
 export function evaluateToolCall(input: ScopeEvaluationInput): ScopeDecision {
   const { identity, toolName, toolInput } = input;
@@ -112,6 +155,13 @@ export function evaluateToolCall(input: ScopeEvaluationInput): ScopeDecision {
     }
   }
 
+  if (PATH_READING_TOOLS.includes(toolName)) {
+    const readDecision = evaluateReadScope(toolName, toolInput, input.cwd);
+    if (readDecision.action === 'block') {
+      return readDecision;
+    }
+  }
+
   if (!identity.scope.tools.includes(toolName)) {
     return {
       action: 'block',
@@ -120,6 +170,18 @@ export function evaluateToolCall(input: ScopeEvaluationInput): ScopeDecision {
         action: `Attempted use of ${toolName}`,
         reason: 'Tool not in agent scope',
         details: { tool: toolName, allowedTools: [...identity.scope.tools] },
+      },
+    };
+  }
+
+  if (toolName === BASH_TOOL && input.isBashSandboxed !== true) {
+    return {
+      action: 'block',
+      violation: {
+        eventType: 'tool.blocked',
+        action: `Attempted use of ${toolName}`,
+        reason: 'Bash is only permitted inside the OS sandbox, which is not active',
+        details: { tool: toolName },
       },
     };
   }
@@ -182,6 +244,114 @@ function evaluateFileScope(
   }
 
   return ALLOW;
+}
+
+/**
+ * Check a file-reading tool call against the read scope: every target the call
+ * names must resolve inside the project root, and none may be a protected
+ * path. A `Read` with no resolvable `file_path` is denied (fail closed).
+ */
+function evaluateReadScope(
+  toolName: string,
+  toolInput: unknown,
+  cwd: string | undefined,
+): ScopeDecision {
+  const targets = extractReadTargets(toolName, toolInput);
+  if (targets === undefined) {
+    return {
+      action: 'block',
+      violation: {
+        eventType: 'scope.violation',
+        action: `Attempted ${toolName} with no file path`,
+        reason: 'File-reading tool call is missing its target path',
+        details: { tool: toolName },
+      },
+    };
+  }
+
+  for (const target of targets) {
+    const relativePath = toProjectRelativePath(target, cwd);
+    if (relativePath === undefined) {
+      return blockedRead(toolName, target, 'Read target is outside the project');
+    }
+    if (isProtectedPath(relativePath)) {
+      return blockedRead(toolName, target, 'Read target is a protected path');
+    }
+  }
+  return ALLOW;
+}
+
+function blockedRead(toolName: string, target: string, reason: string): ScopeDecision {
+  return {
+    action: 'block',
+    violation: {
+      eventType: 'scope.violation',
+      action: `Attempted ${toolName} of ${target}`,
+      reason,
+      details: { tool: toolName, filePath: target },
+    },
+  };
+}
+
+/** True when a project-relative path is one no agent may read. */
+export function isProtectedPath(relativePath: string): boolean {
+  return PROTECTED_PROJECT_GLOBS.some((glob) => matchesGlob(relativePath, glob));
+}
+
+const GLOB_CHARACTERS = /[*?[\]{}]/;
+
+/**
+ * The literal directory prefix of a glob pattern: the segments before the
+ * first one containing a glob character. `/etc/**` yields `/etc`, `../*.md`
+ * yields `..`, and `**\/*.ts` yields `''` (no prefix).
+ */
+function literalPrefixOfPattern(pattern: string): string {
+  const segments = pattern.replace(/\\/g, '/').split('/');
+  const firstGlob = segments.findIndex((segment) => GLOB_CHARACTERS.test(segment));
+  const literal = firstGlob === -1 ? segments : segments.slice(0, firstGlob);
+  return literal.join('/');
+}
+
+/**
+ * The paths a file-reading tool call will read from, or `undefined` when a
+ * required target is missing.
+ *
+ *   - `Read` reads exactly `file_path` (required).
+ *   - `Grep` searches under `path`, defaulting to the project root.
+ *   - `Glob` matches `pattern` under `path`, defaulting to the project root.
+ *     The pattern can itself point elsewhere (`/etc/**`, `../**`), so its
+ *     literal prefix — resolved against `path` — is a target too.
+ *
+ * An omitted optional `path` contributes `'.'`, the project root.
+ */
+export function extractReadTargets(toolName: string, toolInput: unknown): string[] | undefined {
+  const record =
+    typeof toolInput === 'object' && toolInput !== null
+      ? (toolInput as Record<string, unknown>)
+      : {};
+  const stringParam = (name: string): string | undefined => {
+    const value = record[name];
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  };
+
+  if (toolName === 'Read') {
+    const filePath = stringParam('file_path');
+    return filePath === undefined ? undefined : [filePath];
+  }
+
+  const searchRoot = stringParam('path') ?? '.';
+  if (toolName !== 'Glob') {
+    return [searchRoot];
+  }
+
+  const prefix = literalPrefixOfPattern(stringParam('pattern') ?? '');
+  if (prefix === '') {
+    // A leading '/' with nothing after it before the first glob (`/*`) still
+    // makes the pattern absolute; an empty prefix otherwise adds nothing.
+    return (stringParam('pattern') ?? '').startsWith('/') ? [searchRoot, '/'] : [searchRoot];
+  }
+  const patternTarget = posixPath.isAbsolute(prefix) ? prefix : posixPath.join(searchRoot, prefix);
+  return [searchRoot, patternTarget];
 }
 
 /**
@@ -331,6 +501,11 @@ export interface ScopeEnforcementConfig {
   readonly auditLogger: AuditLogger;
   /** Project id stamped onto emitted audit events. */
   readonly projectId: string;
+  /**
+   * Whether the agent's `Bash` commands run inside the OS sandbox (see
+   * ../sandbox/bash-sandbox.ts). Bash is denied unless this is `true`.
+   */
+  readonly isBashSandboxed?: boolean;
   /** Clock for the expiry check and event timestamps. Defaults to the system clock. */
   readonly now?: () => Date;
   /** Audit event id generator. Defaults to a random UUID. */
@@ -373,6 +548,9 @@ export function createScopeEnforcementHook(
       toolInput: preToolUse.tool_input,
       now: now(),
       cwd: preToolUse.cwd,
+      ...(config.isBashSandboxed !== undefined
+        ? { isBashSandboxed: config.isBashSandboxed }
+        : {}),
     });
 
     if (decision.action === 'allow') {
