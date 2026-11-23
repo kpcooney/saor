@@ -7,7 +7,8 @@ This is the Rust backend, following Tauri's standard convention where the native
 - **JSONL audit store** (`audit/`) — append-only event log capturing every agent action, scope violation, and lifecycle event
 - **Reference resolver** (`references/`) — resolves URI schemes (`file://`, `standards://`, `memory://`, `audit://`) used in agent reference manifests
 - **Agent identity and scope validation** (`identity/`) — validates `AgentIdentity` structs and enforces file glob and tool allowlist restrictions
-- **Agent process lifecycle** (`process/`) — spawns, monitors, and terminates the TypeScript agent sidecar processes
+- **Agent process lifecycle** (`process/`) — spawns, monitors, and terminates the TypeScript agent sidecar processes, and attaches the storage bridge to each one
+- **Storage bridge** (`bridge/`) — serves a running agent's memory, audit, and reference-resolution requests over the agent process's stdio, since a Node subprocess cannot call `invoke`; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
 - **Project registry** (`project/`) — app-level SQLite index of known projects (the "known projects" list the UI opens), stored in the Tauri app-data directory; see [ADR-008](../docs/adr/008-project-registry.md)
 - **IPC command handlers** (`commands/`, registered in `src/lib.rs`) — thin Tauri `#[tauri::command]` functions that bridge frontend `invoke()` calls to the modules above (project, memory, audit, and agent-session commands)
 
@@ -25,6 +26,8 @@ cargo test            # run tests
 cargo clippy          # lint (warnings treated as errors in CI)
 cargo fmt --check     # check formatting
 ```
+
+`cargo test` includes `tests/storage_bridge.rs`, which spawns `node` against the compiled agent layer. Build it first — `(cd ../agents && npm run build)` — or that test fails with the same instruction.
 
 To run the full Tauri app (frontend + backend together), use `npm run tauri dev` from the project root.
 

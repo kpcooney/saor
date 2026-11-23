@@ -25,8 +25,9 @@
  * Resolution runs behind the {@link ReferenceResolver} port rather than reaching
  * the Rust resolver directly (CLAUDE.md principle 5, "abstract the backends").
  * The concrete adapter that carries a `resolve` call across the sidecar boundary
- * to the Rust resolver (`src-tauri/src/references/`) lands with the Tauri IPC
- * work (issue #12); this tool is written and tested against the port. Scheme
+ * to the Rust resolver (`src-tauri/src/references/`) is
+ * `createBridgeReferenceResolver` in ../bridge/adapters.ts (issue #59); this
+ * tool is written and tested against the port. Scheme
  * support — including which schemes are still deferred — is owned by the
  * resolver, so it lives in one place rather than being duplicated here.
  *
@@ -56,8 +57,9 @@ export type ResolvedReference =
 
 /**
  * The port through which `resolve_ref` dereferences a URI. Kept to the single
- * operation the tool uses, so the concrete IPC-backed implementation (issue
- * #12) has a small, clear contract and tests can supply a fake. The resolver
+ * operation the tool uses, so the concrete bridge-backed implementation
+ * (../bridge/adapters.ts) has a small, clear contract and tests can supply a
+ * fake. The resolver
  * owns scheme dispatch and rejects unknown or deferred schemes.
  */
 export interface ReferenceResolver {

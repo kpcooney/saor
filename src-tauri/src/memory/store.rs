@@ -15,7 +15,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, Row};
 
-use super::schema::{initialize_schema, MemoryEntry, MemoryError};
+use super::schema::{initialize_schema, MemoryCategory, MemoryEntry, MemoryError};
 
 /// SQLite-backed memory store. Owns its database connection and provides
 /// CRUD operations on memory entries with automatic FTS5 indexing.
@@ -110,6 +110,43 @@ impl SqliteMemoryStore {
     /// single surface rather than reaching for its connection.
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<MemoryEntry>, MemoryError> {
         super::fts::keyword_search(&self.conn, query, limit)
+    }
+
+    /// [`Self::search`] restricted to one category when `category` is `Some`.
+    /// The filter applies before the limit, so up to `limit` entries of that
+    /// category are returned.
+    pub fn search_in_category(
+        &self,
+        query: &str,
+        category: Option<&MemoryCategory>,
+        limit: i64,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        super::fts::keyword_search_in_category(&self.conn, query, category, limit)
+    }
+
+    /// Returns the most recently written entries of a category, newest first,
+    /// limited to `limit`. Unlike `search` this needs no query — it is the
+    /// primitive behind "what has this project learned lately?".
+    ///
+    /// Entries with equal `created_at` are ordered by insertion (newest
+    /// insert first), so the result is deterministic.
+    pub fn recent_by_category(
+        &self,
+        category: &MemoryCategory,
+        limit: i64,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, category, content, metadata, created_by, created_at, weight
+             FROM memory_entries
+             WHERE category = ?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?2",
+        )?;
+        let entries = stmt
+            .query_map(params![category.to_string(), limit], row_to_entry)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(unwrap_row_to_entry_error)?;
+        Ok(entries)
     }
 
     /// Registers a project row in this database's `projects` table.
@@ -282,6 +319,37 @@ mod tests {
         assert_eq!(read_back.created_by, entry.created_by);
         assert_eq!(read_back.created_at, entry.created_at);
         assert!((read_back.weight - entry.weight).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_recent_by_category_returns_newest_first_within_the_category() {
+        let store = SqliteMemoryStore::new_in_memory().unwrap();
+        insert_test_project(&store);
+
+        let mut older = test_entry("older", "first learning");
+        older.created_at = "2026-02-25T12:00:00Z".to_string();
+        let mut newer = test_entry("newer", "second learning");
+        newer.created_at = "2026-02-26T12:00:00Z".to_string();
+        let mut convention = test_entry("conv", "a convention");
+        convention.category = MemoryCategory::Convention;
+        convention.created_at = "2026-02-27T12:00:00Z".to_string();
+        for entry in [&older, &newer, &convention] {
+            store.write_entry(entry).unwrap();
+        }
+
+        let learnings = store
+            .recent_by_category(&MemoryCategory::Learning, 10)
+            .unwrap();
+        let ids: Vec<&str> = learnings.iter().map(|e| e.id.as_str()).collect();
+        // Newest first, and the (even newer) convention is excluded.
+        assert_eq!(ids, vec!["newer", "older"]);
+
+        // The limit is honoured.
+        let one = store
+            .recent_by_category(&MemoryCategory::Learning, 1)
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].id, "newer");
     }
 
     #[test]
