@@ -110,8 +110,6 @@ function inspect(root: string, events: readonly AuditEvent[]): Check[] {
     {
       name: `sandbox blocks were audited as scope.violation (${violations.length} recorded)`,
       passed: violations.length > 0,
-      // The SDK reports violations on macOS only.
-      informational: process.platform !== 'darwin',
     },
     {
       name: 'KNOWN LIMIT — a new top-level file could be created (NEW_TOP_LEVEL.md)',
@@ -119,6 +117,35 @@ function inspect(root: string, events: readonly AuditEvent[]): Check[] {
       informational: true,
     },
   ];
+}
+
+/**
+ * Print what the audit hooks recorded, so a surprising result can be diagnosed
+ * from the output alone: the count of each event type, and for every Bash
+ * command that failed, the error text the hooks were given.
+ */
+function reportAuditTrail(events: readonly AuditEvent[]): void {
+  const counts = new Map<string, number>();
+  for (const event of events) {
+    counts.set(event.eventType, (counts.get(event.eventType) ?? 0) + 1);
+  }
+  const summary = [...counts].map(([type, count]) => `${type} ×${count}`).join(', ');
+  console.log(`Audit events: ${summary.length > 0 ? summary : 'none'}`);
+
+  const commandByToolUse = new Map<unknown, unknown>();
+  for (const event of events) {
+    if (event.eventType === 'tool.invoked' && event.action === 'Bash') {
+      const parameters = event.details['parameters'] as Record<string, unknown> | undefined;
+      commandByToolUse.set(event.details['toolUseId'], parameters?.['command']);
+    }
+  }
+  for (const event of events) {
+    if (event.eventType === 'tool.completed' && event.action === 'Bash' && event.result === 'failure') {
+      const command = String(commandByToolUse.get(event.details['toolUseId']) ?? '?');
+      const error = (event.reason ?? '').replace(/\s+/g, ' ').slice(0, 200);
+      console.log(`  failed: ${command}\n          → ${error}`);
+    }
+  }
 }
 
 async function main(): Promise<number> {
@@ -157,6 +184,8 @@ async function main(): Promise<number> {
       (event) => event.eventType === 'tool.invoked' && event.action === 'Bash',
     ).length;
     console.log(`Bash commands attempted: ${bashCalls} of 6`);
+
+    reportAuditTrail(events);
 
     const checks = inspect(root, events);
     for (const check of checks) {

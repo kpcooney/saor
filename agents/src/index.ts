@@ -138,5 +138,7 @@ export { systemBashSandboxEnvironment } from './sandbox/system-environment.js';
 export {
   buildSandboxViolationEvent,
   createSandboxViolationAuditHook,
+  detectSandboxDenial,
   extractSandboxViolations,
 } from './hooks/sandbox-violation-audit.js';
+export type { SandboxDenialEvidence } from './hooks/sandbox-violation-audit.js';
