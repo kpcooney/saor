@@ -9,13 +9,15 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import type { BranchState } from '../../src/git/branch-state.js';
 import { createAgentIdentity } from '../../src/identity/factory.js';
 import type { AgentIdentity, AgentScope } from '../../src/identity/types.js';
 import type { AuditEvent, AuditLogger } from '../../src/hooks/audit-logger.js';
 import {
   buildScopeViolationEvent,
   createScopeEnforcementHook,
-  evaluateToolCall,
+  branchIsInScope,
+  evaluateToolCall as evaluateToolCallWithoutDefaults,
   fileIsInScope,
   isCredentialExpired,
   extractReadTargets,
@@ -25,6 +27,20 @@ import {
 } from '../../src/hooks/scope-enforcement.js';
 
 const NOW = new Date('2026-06-01T12:00:00.000Z');
+
+/** The branch the test identities are scoped to (`branches: ['main']`). */
+const ON_SCOPED_BRANCH: BranchState = { kind: 'branch', name: 'main' };
+
+/**
+ * `evaluateToolCall` with the scoped branch checked out unless a test says
+ * otherwise. Without a branch the evaluator denies every write (fail closed),
+ * which would mask what the file-scope and allowlist tests are checking.
+ */
+function evaluateToolCall(
+  input: Parameters<typeof evaluateToolCallWithoutDefaults>[0],
+): ReturnType<typeof evaluateToolCallWithoutDefaults> {
+  return evaluateToolCallWithoutDefaults({ currentBranch: ON_SCOPED_BRANCH, ...input });
+}
 const FUTURE = new Date('2026-06-01T18:00:00.000Z').toISOString();
 const PAST = new Date('2026-06-01T06:00:00.000Z').toISOString();
 
@@ -281,6 +297,7 @@ describe('createScopeEnforcementHook', () => {
       identity: identityWith(),
       auditLogger: logger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
       now: () => NOW,
     });
 
@@ -303,6 +320,7 @@ describe('createScopeEnforcementHook', () => {
       identity: identityWith(),
       auditLogger: logger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
       now: () => NOW,
       generateEventId: () => 'evt-fixed',
     });
@@ -335,6 +353,7 @@ describe('createScopeEnforcementHook', () => {
       identity: identityWith({}, PAST),
       auditLogger: logger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
       now: () => NOW,
     });
 
@@ -357,6 +376,7 @@ describe('createScopeEnforcementHook', () => {
       identity: identityWith(),
       auditLogger: logger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
     });
 
     const result = await hook(
@@ -394,6 +414,7 @@ describe('createScopeEnforcementHook', () => {
       identity: identityWith(),
       auditLogger: throwingLogger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
       now: () => NOW,
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -682,6 +703,7 @@ describe('evaluateToolCall — Bash sandbox requirement', () => {
       identity: bashIdentity(),
       auditLogger: logger,
       projectId: 'proj-1',
+      readCurrentBranch: () => ON_SCOPED_BRANCH,
       isBashSandboxed: false,
       now: () => NOW,
     });
@@ -691,5 +713,133 @@ describe('evaluateToolCall — Bash sandbox requirement', () => {
     expect(result.hookSpecificOutput).toMatchObject({ permissionDecision: 'deny' });
     expect(events).toHaveLength(1);
     expect(events[0]?.eventType).toBe('tool.blocked');
+  });
+});
+
+// --- Branch scope (issue #58) ------------------------------------------------
+
+describe('evaluateToolCall — branch scope', () => {
+  const featureIdentity = () =>
+    identityWith({ branches: ['58/*'], tools: ['Read', 'Write', 'Edit', 'Bash'] });
+  const write = { file_path: 'agents/src/new.ts' };
+
+  function decide(toolName: string, toolInput: unknown, currentBranch?: BranchState) {
+    return evaluateToolCallWithoutDefaults({
+      identity: featureIdentity(),
+      toolName,
+      toolInput,
+      now: NOW,
+      isBashSandboxed: true,
+      ...(currentBranch !== undefined ? { currentBranch } : {}),
+    });
+  }
+
+  function expectBranchBlocked(decision: ReturnType<typeof decide>, reason: string): void {
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.eventType).toBe('scope.violation');
+    expect(decision.violation.reason).toBe(reason);
+    expect(decision.violation.details).toMatchObject({ allowedBranches: ['58/*'] });
+  }
+
+  it('allows writes while an in-scope branch is checked out', () => {
+    const onFeature: BranchState = { kind: 'branch', name: '58/enforce-branch-scope' };
+
+    expect(decide('Write', write, onFeature).action).toBe('allow');
+    expect(decide('Edit', write, onFeature).action).toBe('allow');
+    expect(decide('Bash', { command: 'git commit -m x' }, onFeature).action).toBe('allow');
+  });
+
+  it('blocks every write-capable tool while an out-of-scope branch is checked out', () => {
+    for (const branch of ['main', '59/other-issue', '58']) {
+      const elsewhere: BranchState = { kind: 'branch', name: branch };
+      for (const [toolName, toolInput] of [
+        ['Write', write],
+        ['Edit', write],
+        ['Bash', { command: 'npm test' }],
+      ] as const) {
+        const decision = decide(toolName, toolInput, elsewhere);
+        expectBranchBlocked(decision, 'Current branch not in agent scope');
+        if (decision.action === 'block') {
+          expect(decision.violation.details).toMatchObject({ branch });
+        }
+      }
+    }
+  });
+
+  it('still allows reads on an out-of-scope branch', () => {
+    const onMain: BranchState = { kind: 'branch', name: 'main' };
+
+    expect(decide('Read', { file_path: 'agents/src/index.ts' }, onMain).action).toBe('allow');
+  });
+
+  it('blocks writes on a detached HEAD', () => {
+    expectBranchBlocked(
+      decide('Write', write, { kind: 'detached' }),
+      'Repository is in detached HEAD state, so no branch is in agent scope',
+    );
+  });
+
+  it('blocks writes when the branch is unknown (fail closed)', () => {
+    expectBranchBlocked(decide('Write', write), 'Current branch could not be determined');
+  });
+
+  it('does not apply to a project that is not a git repository', () => {
+    expect(decide('Write', write, { kind: 'none' }).action).toBe('allow');
+  });
+
+  it('reports an out-of-scope file before the branch', () => {
+    const decision = decide('Write', { file_path: 'docs/x.md' }, { kind: 'branch', name: 'main' });
+
+    expect(decision.action).toBe('block');
+    if (decision.action !== 'block') return;
+    expect(decision.violation.reason).toBe('File not in agent scope');
+  });
+});
+
+describe('branchIsInScope', () => {
+  it('matches branch names against scope globs', () => {
+    expect(branchIsInScope('58/enforce-branch-scope', ['58/*'])).toBe(true);
+    expect(branchIsInScope('main', ['main'])).toBe(true);
+    expect(branchIsInScope('13/basic-ui', ['*/*'])).toBe(true);
+    // `*/*` is "any feature branch": it never matches a single-segment name.
+    expect(branchIsInScope('main', ['*/*'])).toBe(false);
+    expect(branchIsInScope('58/a/b', ['58/*'])).toBe(false);
+    expect(branchIsInScope('580/x', ['58/*'])).toBe(false);
+    expect(branchIsInScope('main', [])).toBe(false);
+  });
+});
+
+describe('createScopeEnforcementHook — branch scope', () => {
+  it('reads the branch at every call and audits a write on the wrong branch', async () => {
+    const { logger, events } = recordingLogger();
+    let checkedOut: BranchState = { kind: 'branch', name: 'main' };
+    const directories: string[] = [];
+    const hook = createScopeEnforcementHook({
+      identity: identityWith(),
+      auditLogger: logger,
+      projectId: 'proj-2',
+      readCurrentBranch: (directory) => {
+        directories.push(directory);
+        return checkedOut;
+      },
+      now: () => NOW,
+    });
+    const call = preToolUseInput('Write', { file_path: 'agents/src/new.ts' });
+
+    const first = await hook(call, 'tool-use-1', HOOK_OPTIONS);
+    // The human switches branches mid-run; the next call must see it.
+    checkedOut = { kind: 'branch', name: '99/unrelated' };
+    const second = await hook(call, 'tool-use-1', HOOK_OPTIONS);
+
+    expect(first.hookSpecificOutput).toMatchObject({ permissionDecision: 'allow' });
+    expect(second.hookSpecificOutput).toMatchObject({ permissionDecision: 'deny' });
+    expect(directories).toEqual([call.cwd, call.cwd]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'scope.violation',
+      result: 'blocked',
+      details: { branch: '99/unrelated', allowedBranches: ['main'] },
+    });
   });
 });
