@@ -33,6 +33,8 @@ export type {
 export {
   createScopeEnforcementHook,
   evaluateToolCall,
+  extractReadTargets,
+  isProtectedPath,
   buildScopeViolationEvent,
 } from './hooks/scope-enforcement.js';
 export type {
@@ -109,8 +111,32 @@ export {
   CODE_AGENT_MEMORY_NAMESPACES,
   CODE_AGENT_STANDARDS,
   CODE_AGENT_DEFAULT_MODEL,
+  CODE_AGENT_READ_DENY_RULES,
 } from './definitions/code-agent.js';
 export type {
   CodeAgentIdentityOptions,
   CodeAgentRuntimeConfig,
 } from './definitions/code-agent.js';
+
+// Bash and read confinement (issue #56, ADR-010): the OS-sandbox settings that
+// hold an agent's shell commands to its file scope, the protected paths no
+// agent may read, and the hook that audits what the sandbox blocked.
+export {
+  BASH_BUILD_OUTPUT_DIRS,
+  buildBashSandboxSettings,
+  computeDeniedWritePaths,
+  isBashSandboxAvailable,
+  writableRootOfGlob,
+} from './sandbox/bash-sandbox.js';
+export type {
+  BashSandboxEnvironment,
+  BashSandboxInput,
+  BashSandboxPlatform,
+} from './sandbox/bash-sandbox.js';
+export { PROTECTED_HOME_PATHS, PROTECTED_PROJECT_GLOBS } from './sandbox/protected-paths.js';
+export { systemBashSandboxEnvironment } from './sandbox/system-environment.js';
+export {
+  buildSandboxViolationEvent,
+  createSandboxViolationAuditHook,
+  extractSandboxViolations,
+} from './hooks/sandbox-violation-audit.js';
