@@ -61,7 +61,8 @@
  *     writable to Bash. The hook still applies the exact glob to `Write` and
  *     `Edit`.
  *   - **Reads are a deny list.** Outside the protected paths, a Bash command
- *     can read whatever the user account can.
+ *     can read whatever the user account can. That includes the environment
+ *     the agent process was started with, which this module does not filter.
  *   - **The object store is shared.** An agent allowed to commit can write
  *     `.git/objects`, which every branch's history lives in. It cannot move
  *     another branch, but a destructive command could damage the local
@@ -81,7 +82,12 @@ import { posix as posixPath } from 'node:path';
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 
 import type { BashGitAccess } from './git-access.js';
-import { PROTECTED_HOME_PATHS, PROTECTED_PROJECT_GLOBS } from './protected-paths.js';
+import {
+  CLAUDE_HOME_DIR,
+  CLAUDE_HOME_READABLE,
+  PROTECTED_HOME_PATHS,
+  PROTECTED_PROJECT_GLOBS,
+} from './protected-paths.js';
 
 /**
  * Directories Bash may write to in addition to the agent's file scope, because
@@ -275,6 +281,22 @@ function sandboxAbsolutePath(absolutePath: string): string {
 }
 
 /**
+ * The home-relative paths inside the Claude CLI's state directory that Bash
+ * must not read: every entry that exists there except the few the CLI needs
+ * sandboxed commands to reach. Listed entry by entry because the sandbox's read
+ * rules are a deny list — there is no way to say "all of this directory but".
+ */
+export function protectedClaudeHomePaths(
+  homeDir: string,
+  listDirectory: (absolutePath: string) => readonly string[],
+): string[] {
+  return [...listDirectory(posixPath.join(homeDir, CLAUDE_HOME_DIR))]
+    .filter((entry) => !CLAUDE_HOME_READABLE.includes(entry))
+    .sort()
+    .map((entry) => `${CLAUDE_HOME_DIR}/${entry}`);
+}
+
+/**
  * Build the sandbox settings for an agent's Bash tool. Pure apart from the
  * injected `listDirectory`, so the result is fully determined by the input.
  */
@@ -299,9 +321,10 @@ export function buildBashSandboxSettings(input: BashSandboxInput): SandboxSettin
     ...(input.git !== undefined ? gitDeniedWritePaths(input.git) : []),
   ].flatMap(underEachRoot);
 
+  const homeDir = input.homeDir.replace(/\\/g, '/');
   const denyRead = [
-    ...PROTECTED_HOME_PATHS.map((path) =>
-      sandboxAbsolutePath(posixPath.join(input.homeDir.replace(/\\/g, '/'), path)),
+    ...[...PROTECTED_HOME_PATHS, ...protectedClaudeHomePaths(homeDir, input.listDirectory)].map(
+      (path) => sandboxAbsolutePath(posixPath.join(homeDir, path)),
     ),
     ...PROTECTED_PROJECT_GLOBS.flatMap(underEachRoot),
   ];

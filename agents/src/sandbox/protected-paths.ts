@@ -48,6 +48,23 @@ export const PROTECTED_HOME_PATHS: readonly string[] = [
   '.kube',
   '.config/gh',
   '.config/gcloud',
-  '.claude',
   '.claude.json',
 ];
+
+/**
+ * The Claude CLI's own state directory under the home directory: settings
+ * (which can hold tokens), credentials, and the transcripts of every other
+ * session. Everything in it is protected except {@link CLAUDE_HOME_READABLE}.
+ */
+export const CLAUDE_HOME_DIR = '.claude';
+
+/**
+ * Entries of `~/.claude` that sandboxed commands must be able to read.
+ *
+ * `shell-snapshots` holds the snapshot of the user's shell setup that the CLI
+ * sources at the start of every Bash command. Denying it does not stop the
+ * command, but every command then prints an "operation not permitted" error
+ * for the snapshot and runs without the user's shell configuration. A live run
+ * showed exactly that when the whole directory was denied.
+ */
+export const CLAUDE_HOME_READABLE: readonly string[] = ['shell-snapshots'];
