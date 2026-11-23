@@ -10,6 +10,8 @@ This package contains:
 - **`src/hooks/`** — Lifecycle hooks: scope enforcement (PreToolUse, blocks out-of-scope actions) and audit logging (PostToolUse, records every action)
 - **`src/mcp/`** — In-process MCP server definitions: memory access tools and the reference resolver (dereferences `file://`, `standards://`, `memory://`, `audit://` URIs)
 
+- **`src/sandbox/`** — OS-sandbox configuration for the `Bash` tool: confines an agent's shell commands to its file scope and away from protected paths. The scope hook cannot path-check a shell command, so the operating system does; see [ADR-010](../docs/adr/010-bash-and-read-confinement.md)
+
 ## Build & Test
 
 All commands run from this directory (`agents/`).
@@ -20,6 +22,16 @@ npm run build         # compile TypeScript (tsc)
 npm test              # run tests (vitest)
 npm run test:watch    # run tests in watch mode
 ```
+
+### Live sandbox check
+
+The unit suite verifies the sandbox settings Saor builds, not that the OS enforces them. To check enforcement, run a real agent session against a throwaway project (makes a few Claude API calls on the small model):
+
+```bash
+npm run build && node dist/verify-bash-sandbox.js
+```
+
+Run it from an ordinary terminal — the Claude CLI refuses to start inside another Claude Code session. Re-run it after upgrading the SDK.
 
 ## Dependencies
 
