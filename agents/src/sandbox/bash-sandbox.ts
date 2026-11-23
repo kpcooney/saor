@@ -27,6 +27,26 @@
  *   - **No opting out**: `allowUnsandboxedCommands` is off, so the model's
  *     per-command sandbox-escape parameter is ignored.
  *
+ * Commits (issue #58, ADR-011). `.git` is outside every agent's file scope, so
+ * by default Bash cannot write it and the agent cannot commit. When the caller
+ * passes {@link BashSandboxInput.git} — which it does only if the checked-out
+ * branch is in the agent's branch scope — `.git` becomes writable *except* for
+ * the files that would let a command leave or alter that branch:
+ *
+ *   - `HEAD` — so the checked-out branch cannot be switched;
+ *   - every other branch's ref, and `packed-refs` — so no other branch can be
+ *     moved or deleted;
+ *   - `refs/tags` and `refs/remotes` — so tags and remote-tracking refs stay
+ *     as they are;
+ *   - `config` and `hooks` — so a command cannot plant code that runs later
+ *     outside the sandbox.
+ *
+ * That leaves exactly what a commit needs: the object store, the index, the
+ * reflogs, and the current branch's own ref. Verified against git directly
+ * under the macOS sandbox: `git commit` succeeds, while `git checkout`,
+ * `git symbolic-ref HEAD`, `git update-ref` and `git branch -f` on another
+ * branch all fail.
+ *
  * Known limits — stated here so the code does not claim more than it enforces:
  *
  *   - **New top-level entries.** Because the deny list is built from what
@@ -42,6 +62,15 @@
  *     `Edit`.
  *   - **Reads are a deny list.** Outside the protected paths, a Bash command
  *     can read whatever the user account can.
+ *   - **The object store is shared.** An agent allowed to commit can write
+ *     `.git/objects`, which every branch's history lives in. It cannot move
+ *     another branch, but a destructive command could damage the local
+ *     repository as a whole. The remote is unaffected: there is no network.
+ *   - **Branches created during the run.** The per-branch ref rules are built
+ *     at launch from the branches that exist then.
+ *   - **A refused branch switch can leave files changed.** `git checkout` of
+ *     another branch rewrites in-scope files before it fails on `HEAD`. The
+ *     branch does not change; the working tree may need `git checkout -- .`.
  *
  * See docs/adr/010-bash-and-read-confinement.md for why this shape was chosen
  * over dropping Bash or parsing commands.
@@ -51,6 +80,7 @@ import { posix as posixPath } from 'node:path';
 
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 
+import type { BashGitAccess } from './git-access.js';
 import { PROTECTED_HOME_PATHS, PROTECTED_PROJECT_GLOBS } from './protected-paths.js';
 
 /**
@@ -86,6 +116,12 @@ export interface BashSandboxInput {
   readonly writableGlobs: readonly string[];
   /** Extra project-relative directories Bash may write. */
   readonly buildOutputDirs: readonly string[];
+  /**
+   * Present only when the agent may commit: makes `.git` writable apart from
+   * the files that would let a command leave or alter the committable branch.
+   * See `resolveBashGitAccess` in ./git-access.ts for when that is.
+   */
+  readonly git?: BashGitAccess;
   /** Absolute path of the user's home directory. */
   readonly homeDir: string;
   /**
@@ -115,9 +151,38 @@ export interface BashSandboxEnvironment extends BashSandboxPlatform {
   readonly listDirectory: (absolutePath: string) => readonly string[];
   /** Resolves symlinks in a path; returns it unchanged if it cannot. */
   readonly realPath: (absolutePath: string) => string;
+  /** Reads a file as text, or `undefined` if it is missing or unreadable. */
+  readonly readTextFile: (absolutePath: string) => string | undefined;
 }
 
 const GLOB_CHARACTERS = /[*?[\]{}]/;
+
+/** The repository directory, relative to the project root. */
+const GIT_DIR = '.git';
+
+/**
+ * Paths inside `.git` that stay unwritable even for an agent allowed to
+ * commit, whatever branches exist. See the module header for why each is here.
+ */
+const GIT_ALWAYS_DENIED: readonly string[] = [
+  'HEAD',
+  'packed-refs',
+  'config',
+  'hooks',
+  'refs/tags',
+  'refs/remotes',
+];
+
+/**
+ * The project-relative paths inside `.git` that Bash must not write when the
+ * agent is allowed to commit: the fixed set, plus every other branch's ref.
+ */
+export function gitDeniedWritePaths(git: BashGitAccess): string[] {
+  return [
+    ...GIT_ALWAYS_DENIED,
+    ...git.otherBranches.map((branch) => `refs/heads/${branch}`),
+  ].map((path) => `${GIT_DIR}/${path}`);
+}
 
 /**
  * Whether the OS sandbox the SDK relies on is present. macOS ships Seatbelt;
@@ -226,13 +291,13 @@ export function buildBashSandboxSettings(input: BashSandboxInput): SandboxSettin
   const writableRoots = [
     ...input.writableGlobs.map(writableRootOfGlob),
     ...input.buildOutputDirs,
+    ...(input.git !== undefined ? [GIT_DIR] : []),
   ];
 
-  const denyWrite = computeDeniedWritePaths(
-    projectRoot,
-    writableRoots,
-    input.listDirectory,
-  ).flatMap(underEachRoot);
+  const denyWrite = [
+    ...computeDeniedWritePaths(projectRoot, writableRoots, input.listDirectory),
+    ...(input.git !== undefined ? gitDeniedWritePaths(input.git) : []),
+  ].flatMap(underEachRoot);
 
   const denyRead = [
     ...PROTECTED_HOME_PATHS.map((path) =>
