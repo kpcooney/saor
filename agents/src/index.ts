@@ -141,8 +141,10 @@ export { systemBashSandboxEnvironment } from './sandbox/system-environment.js';
 export {
   buildSandboxViolationEvent,
   createSandboxViolationAuditHook,
+  detectSandboxDenial,
   extractSandboxViolations,
 } from './hooks/sandbox-violation-audit.js';
+export type { SandboxDenialEvidence } from './hooks/sandbox-violation-audit.js';
 
 // Branch scope (issue #58, ADR-011): reading what a repository has checked out,
 // and deciding whether an agent's sandboxed Bash may commit to it.

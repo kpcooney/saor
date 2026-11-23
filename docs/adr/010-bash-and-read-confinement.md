@@ -37,8 +37,8 @@ The forces:
 | `Write` / `Edit` outside `scope.files` | Scope hook (unchanged) | Denied before it runs; `scope.violation` audited |
 | `Read` / `Grep` / `Glob` naming a path outside the project, or a protected path | Scope hook | Denied before it runs; `scope.violation` audited |
 | `Grep` / `Glob` sweeping a directory that *contains* a protected file | SDK `Read(...)` deny rules | File excluded from the search |
-| `Bash` writing outside the project | OS sandbox | Operation fails; `scope.violation` audited (macOS) |
-| `Bash` modifying or deleting an existing out-of-scope path, or creating anything inside an existing out-of-scope directory | OS sandbox, via a generated deny list | Operation fails; `scope.violation` audited (macOS) |
+| `Bash` writing outside the project | OS sandbox | Operation fails; `scope.violation` audited |
+| `Bash` modifying or deleting an existing out-of-scope path, or creating anything inside an existing out-of-scope directory | OS sandbox, via a generated deny list | Operation fails; `scope.violation` audited |
 | `Bash` reading a protected path | OS sandbox | Operation fails |
 | `Bash` network access | OS sandbox (no domains allowed) | Connection fails |
 | `Bash` on a host with no OS sandbox | Scope hook, plus removal from the tool lists | Denied before it runs; `tool.blocked` audited |
@@ -49,7 +49,7 @@ The hook rows are covered by the unit suite. The write deny list and the protect
 
 **The write deny list** is computed when the agent is launched: walk the project tree and deny every entry that is neither inside a writable root nor an ancestor of one. Writable roots are the literal directory prefixes of the file-scope globs, plus a fixed list of build-output directories (`node_modules`, `dist`, `src-tauri/target`, …) so that running a build or a test suite still works.
 
-**Sandbox blocks are audited after the fact.** A sandboxed command is allowed to start and the OS stops the individual operation, so a PostToolUse hook looks for the violation report the SDK appends to the command's output and records a `scope.violation` event tied to the same `toolUseId`.
+**Sandbox blocks are audited after the fact.** A sandboxed command is allowed to start and the OS stops the individual operation, so a PostToolUse hook inspects the command's result and records a `scope.violation` event tied to the same `toolUseId`. It accepts two kinds of evidence. The SDK's own violation report (a `<sandbox_violations>` block) is authoritative but, as a live run showed, usually absent — five blocked operations produced none. The likely reason is timing: on macOS the SDK learns of violations from the system log, which can lag behind a command that fails quickly. So the hook also recognizes the error a denied operation makes the command print — `Operation not permitted` on macOS, `Read-only file system` on Linux. That is an inference, and the event records which evidence it rests on (`details.detection`) and words its reason accordingly.
 
 ### Known limits
 
@@ -59,7 +59,7 @@ These are stated in the module headers as well, so the code no longer claims mor
 2. **Directory granularity for Bash.** `agents/src/**/*.ts` makes all of `agents/src` writable to Bash. The exact glob still applies to `Write` and `Edit`.
 3. **Bash reads are a deny list.** Outside the protected paths, a command can read whatever the user account can. Combined with no network access this limits exfiltration to what the agent can place in memory, the audit trail, or its own output.
 4. **`.git` is not writable by default.** It is outside the Code Agent's file scope. [ADR-011](011-branch-scope-enforcement.md) opens it — partially, and only on an in-scope branch — so the agent can commit.
-5. **Violation auditing is macOS-only.** On Linux a blocked operation still fails and still appears in the command's `tool.completed` event, but the SDK reports no violation detail, so no `scope.violation` event is produced.
+5. **Violation auditing is mostly inferred.** Most `scope.violation` events for Bash rest on the OS error text rather than a sandbox report, so an unrelated `Operation not permitted` in a command's output would be recorded as a likely sandbox block. In the other direction, a blocked *read* on Linux can surface as `No such file or directory` or `Permission denied`, which are too common to treat as evidence; such a block still fails and still appears in the command's `tool.completed` event, but produces no `scope.violation`.
 6. **Linux skips glob rules.** The SDK cannot apply glob patterns to bubblewrap writes; the generated deny list is literal paths for that reason. Protected-path read globs are expanded to existing files at launch on Linux.
 
 ## Consequences
@@ -67,7 +67,7 @@ These are stated in the module headers as well, so the code no longer claims mor
 **Positive:**
 
 - **The boundary is enforced by the OS.** A Bash write outside the project fails regardless of how the command is phrased.
-- **The audit trail records the attempt**, both for denied reads and (on macOS) for sandbox-blocked writes.
+- **The audit trail records the attempt**, both for denied reads and for sandbox-blocked Bash operations.
 - **The audit trail and memory database are protected from the agent** — unreadable and unwritable outside the memory tools.
 - **The agent keeps its shell**, with builds and tests working.
 - **Fails closed.** No sandbox means no Bash, not unconfined Bash.
