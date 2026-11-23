@@ -10,6 +10,9 @@ This package contains:
 - **`src/hooks/`** — Lifecycle hooks: scope enforcement (PreToolUse, blocks out-of-scope actions) and audit logging (PostToolUse, records every action)
 - **`src/mcp/`** — In-process MCP server definitions: memory access tools and the reference resolver (dereferences `file://`, `standards://`, `memory://`, `audit://` URIs)
 
+- **`src/bridge/`** — The storage bridge: a client that exchanges line-delimited JSON with the Rust backend over this process's stdio, and the adapters that implement the memory, audit, and reference ports on top of it. This is how a launched agent reaches the Rust-owned stores; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
+- **`src/sidecar.ts`** / **`src/sidecar-runner.ts`** — The process entrypoint Rust launches (`node dist/sidecar.js …`) and the run logic behind it: build the Code Agent over the bridge, run it on the launch task, report the outcome
+
 ## Build & Test
 
 All commands run from this directory (`agents/`).
@@ -28,5 +31,6 @@ npm run test:watch    # run tests in watch mode
 
 ## Key Notes
 
+- **Stdout is a protocol channel.** In the sidecar process, stdout carries bridge requests and status lines to Rust. Never `console.log` from code that runs there — use `console.error` for diagnostics. Stray stdout lines are dropped by the Rust side, so they are lost rather than harmful.
 - In-process MCP tools use `const myTool = tool(...)` — do not annotate with an explicit `SdkMcpToolDefinition` type (the generic resolves to `never`).
 - SDK version verified against: `@anthropic-ai/claude-agent-sdk@0.2.58`
