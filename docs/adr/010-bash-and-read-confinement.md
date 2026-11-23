@@ -43,7 +43,7 @@ The forces:
 | `Bash` network access | OS sandbox (no domains allowed) | Connection fails |
 | `Bash` on a host with no OS sandbox | Scope hook, plus removal from the tool lists | Denied before it runs; `tool.blocked` audited |
 
-The hook rows are covered by the unit suite. The rows enforced by the OS sandbox or by SDK deny rules describe what Saor configures; observing them requires a real agent session, which is what the live check below is for.
+The hook rows are covered by the unit suite. The write deny list and the protected-read list are additionally tested against the real macOS sandbox (`agents/tests/sandbox/files-under-sandbox.test.ts`): real shell commands run under `sandbox-exec` with the generated rules, with negative controls. What that cannot show is the part only the SDK does — confining writes to the project as a whole, blocking the network, applying `Read(...)` deny rules, and translating these settings into its own sandbox profile. Observing those requires a real agent session, which is what the live check below is for.
 
 **Protected paths** (`agents/src/sandbox/protected-paths.ts`) are, inside the project: `.env` files, `.claude/settings.local.json`, and `.sdlc/` — the memory database and audit trail, which an agent reaches only through the memory tools that enforce its namespaces. For Bash they also include the usual credential locations under the home directory (`~/.ssh`, `~/.aws`, `~/.claude`, and similar).
 
