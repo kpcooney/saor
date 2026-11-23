@@ -27,6 +27,7 @@ const TREE: Record<string, readonly string[]> = {
   [`${ROOT}/agents`]: ['dist', 'node_modules', 'package.json', 'src', 'tests'],
   [`${ROOT}/src-tauri`]: ['Cargo.toml', 'src', 'target', 'tauri.conf.json'],
   [`${ROOT}/docs`]: ['adr'],
+  '/Users/dev/.claude': ['.credentials.json', 'projects', 'settings.json', 'shell-snapshots'],
 };
 
 const visited: string[] = [];
@@ -139,7 +140,7 @@ describe('buildBashSandboxSettings', () => {
 
     expect(denyRead).toContain('//Users/dev/.ssh');
     expect(denyRead).toContain('//Users/dev/.aws');
-    expect(denyRead).toContain('//Users/dev/.claude');
+    expect(denyRead).toContain('//Users/dev/.claude.json');
     expect(denyRead).toContain(`/${ROOT}/.env`);
     expect(denyRead).toContain(`/${ROOT}/**/.env`);
     expect(denyRead).toContain(`/${ROOT}/.sdlc`);
@@ -161,6 +162,19 @@ describe('buildBashSandboxSettings', () => {
     expect(denyWrite).toContain(`//private${ROOT}/docs`);
     expect(denyWrite).toHaveLength(2 * (settings.filesystem?.denyWrite ?? []).length);
     expect(symlinked.filesystem?.denyRead).toContain(`//private${ROOT}/.sdlc`);
+  });
+
+  it('protects the Claude CLI state directory except the shell snapshots it must read', () => {
+    const denyRead = settings.filesystem?.denyRead ?? [];
+
+    // Settings can hold tokens; projects holds other sessions' transcripts.
+    expect(denyRead).toContain('//Users/dev/.claude/settings.json');
+    expect(denyRead).toContain('//Users/dev/.claude/.credentials.json');
+    expect(denyRead).toContain('//Users/dev/.claude/projects');
+    // The CLI sources a snapshot from here at the start of every command; with
+    // the whole directory denied, every command printed a permission error.
+    expect(denyRead).not.toContain('//Users/dev/.claude/shell-snapshots');
+    expect(denyRead).not.toContain('//Users/dev/.claude');
   });
 
   it('tolerates a trailing slash on the project root', () => {

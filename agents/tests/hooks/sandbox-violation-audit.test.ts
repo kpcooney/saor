@@ -142,6 +142,30 @@ describe('detectSandboxDenial', () => {
   });
 });
 
+describe('detectSandboxDenial — messages seen in a live run', () => {
+  // Error text recorded from a real agent session on macOS with zsh.
+  it('recognizes zsh reporting a denied redirection in lowercase', () => {
+    expect(
+      detectSandboxDenial('Exit code 1\n(eval):1: operation not permitted: docs/existing.md'),
+    ).toEqual({
+      kind: 'error-text',
+      detail: '(eval):1: operation not permitted: docs/existing.md',
+    });
+  });
+
+  it('recognizes git being refused a branch switch', () => {
+    expect(
+      detectSandboxDenial("Exit code 128\nerror: couldn't set 'HEAD'\nfatal: unable to update HEAD"),
+    ).toEqual({ kind: 'error-text', detail: "error: couldn't set 'HEAD'" });
+  });
+
+  it('recognizes cat being refused a protected file', () => {
+    expect(
+      detectSandboxDenial('Exit code 1\ncat: .sdlc/secret.txt: Operation not permitted'),
+    ).toEqual({ kind: 'error-text', detail: 'cat: .sdlc/secret.txt: Operation not permitted' });
+  });
+});
+
 describe('createSandboxViolationAuditHook', () => {
   it('records a scope.violation when a Bash result reports a sandbox block', async () => {
     const { hook, events } = setup();

@@ -22,12 +22,14 @@
  *     violations from the system log, which can lag behind a command that
  *     fails quickly.
  *   - **The operating system's error text** — the message a denied operation
- *     makes the command print: `Operation not permitted` under Seatbelt on
- *     macOS, `Read-only file system` under bubblewrap on Linux. This is what
- *     usually fires. It is an inference: those messages can have other causes,
- *     though for a file operation by a sandboxed command the sandbox is by far
- *     the likeliest. The event says which evidence it rests on
- *     (`details.detection`), and its reason is worded accordingly.
+ *     makes the command print: "operation not permitted" under Seatbelt on
+ *     macOS (capitalized by most tools, lowercase from zsh itself), "read-only
+ *     file system" under bubblewrap on Linux, and git's "couldn't set 'HEAD'"
+ *     when it is refused a ref. This is what usually fires. It is an
+ *     inference: those messages can have other causes, though for a file
+ *     operation by a sandboxed command the sandbox is by far the likeliest.
+ *     The event says which evidence it rests on (`details.detection`), and its
+ *     reason is worded accordingly.
  *
  * Limit: a blocked *read* on Linux can surface as `No such file or directory`
  * or `Permission denied`, which are too common to treat as evidence. Such a
@@ -55,10 +57,21 @@ const VIOLATIONS_OPEN = '<sandbox_violations>';
 const VIOLATIONS_CLOSE = '</sandbox_violations>';
 
 /**
- * Messages a command prints when the OS refuses it an operation the sandbox
- * forbids: EPERM under Seatbelt (macOS), EROFS under bubblewrap (Linux).
+ * What a command prints when the OS refuses it an operation the sandbox
+ * forbids. Matched case-insensitively: a live run showed zsh reporting a denied
+ * redirection as "operation not permitted" in lowercase, where `cat` and most
+ * other tools capitalize it.
+ *
+ *   - EPERM under Seatbelt (macOS).
+ *   - EROFS under bubblewrap (Linux).
+ *   - git, refused the rename that updates a ref, reports only that it
+ *     "couldn't set" the ref — no errno text — so that is matched as well.
  */
-const DENIAL_MESSAGES: readonly string[] = ['Operation not permitted', 'Read-only file system'];
+const DENIAL_PATTERNS: readonly RegExp[] = [
+  /operation not permitted/i,
+  /read-only file system/i,
+  /couldn't set '[^']+'/,
+];
 
 /** At most this many denial lines are kept on the audit event. */
 const MAX_DENIAL_LINES = 10;
@@ -124,7 +137,7 @@ export function detectSandboxDenial(toolResult: unknown): SandboxDenialEvidence 
   const denialLines = toSearchableText(toolResult)
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => DENIAL_MESSAGES.some((message) => line.includes(message)));
+    .filter((line) => DENIAL_PATTERNS.some((pattern) => pattern.test(line)));
   if (denialLines.length === 0) {
     return undefined;
   }

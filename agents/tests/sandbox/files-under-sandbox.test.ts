@@ -121,6 +121,9 @@ describe.skipIf(process.platform !== 'darwin')('files under the generated sandbo
     home = realpathSync(mkdtempSync(join(tmpdir(), 'saor-files-sandbox-home-')));
     mkdirSync(join(home, '.ssh'));
     writeFileSync(join(home, '.ssh', 'id_rsa'), SECRET);
+    mkdirSync(join(home, '.claude', 'shell-snapshots'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'settings.json'), SECRET);
+    writeFileSync(join(home, '.claude', 'shell-snapshots', 'snapshot.sh'), 'export SNAPSHOT=loaded\n');
 
     const settings = buildBashSandboxSettings({
       projectRoot: givenRoot,
@@ -200,6 +203,7 @@ describe.skipIf(process.platform !== 'darwin')('files under the generated sandbo
       'cat .sdlc/audit/2026-11-23.jsonl',
       'cat .claude/settings.local.json',
       `cat ${join(home, '.ssh', 'id_rsa')}`,
+      `cat ${join(home, '.claude', 'settings.json')}`,
       // Copying is a read too: the secret must not reach an in-scope file.
       'cp .env src/leak.txt',
     ]) {
@@ -209,6 +213,18 @@ describe.skipIf(process.platform !== 'darwin')('files under the generated sandbo
     }
     const leak = join(root, 'src', 'leak.txt');
     expect(existsSync(leak) && readFileSync(leak, 'utf8').includes('do-not-leak')).toBe(false);
+  });
+
+  it('lets a command source the shell snapshot the CLI keeps under ~/.claude', () => {
+    // The CLI starts every Bash command by sourcing this file. A live run with
+    // all of ~/.claude denied printed a permission error on every command.
+    const snapshot = join(home, '.claude', 'shell-snapshots', 'snapshot.sh');
+
+    const result = sandboxed(`. ${snapshot} && echo "snapshot=$SNAPSHOT"`);
+
+    expect(result.status, result.output).toBe(0);
+    expect(result.output).toContain('snapshot=loaded');
+    expect(result.output.toLowerCase()).not.toContain('operation not permitted');
   });
 
   it('negative control: unprotected files stay readable, in or out of scope', () => {
