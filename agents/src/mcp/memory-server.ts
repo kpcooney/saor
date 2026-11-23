@@ -27,8 +27,8 @@
  * The store is injected through the {@link MemoryStore} port rather than reached
  * directly (CLAUDE.md principle 5, "abstract the backends"). The concrete
  * adapter that carries these calls across the sidecar boundary to the Rust
- * SQLite store lands with the Tauri IPC work (issue #12); this server is written
- * and tested against the port.
+ * SQLite store is `createBridgeMemoryStore` in ../bridge/adapters.ts (issue
+ * #59); this server is written and tested against the port.
  *
  * See docs/architecture/sdlc-agent-architecture-research-v4.md Section 6.4 for
  * the MCP tool definitions and Section 6.2 for what belongs in memory.
@@ -96,8 +96,9 @@ export interface ProjectContext {
 
 /**
  * The port through which the memory tools reach the store. Kept to just the
- * operations the tools use, so the concrete IPC-backed implementation (issue
- * #12) has a small, clear contract to satisfy and tests can supply a fake.
+ * operations the tools use, so the concrete bridge-backed implementation
+ * (../bridge/adapters.ts) has a small, clear contract to satisfy and tests can
+ * supply a fake.
  */
 export interface MemoryStore {
   /** Keyword-search entries, ordered most-relevant first. */
