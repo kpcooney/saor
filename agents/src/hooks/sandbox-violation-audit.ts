@@ -17,9 +17,10 @@
  *
  *   - **The sandbox's own report** — a `<sandbox_violations>` block the SDK
  *     appends to a command's output. Authoritative when present, but in
- *     practice often absent: on macOS the SDK learns of violations from the
- *     system log, which lags behind a command that fails quickly. A live run
- *     with five blocked operations produced no block at all.
+ *     practice often absent: a live run with five blocked operations produced
+ *     none. The likely reason is timing — on macOS the SDK learns of
+ *     violations from the system log, which can lag behind a command that
+ *     fails quickly.
  *   - **The operating system's error text** — the message a denied operation
  *     makes the command print: `Operation not permitted` under Seatbelt on
  *     macOS, `Read-only file system` under bubblewrap on Linux. This is what
