@@ -37,7 +37,11 @@
  *     paths, and has no network. That module's header lists the limits. Where
  *     no OS sandbox is available, Bash is withheld entirely.
  *
- * `scope.branches` is declared on the identity but not enforced here.
+ *   - Branch scope (issue #58, ADR-011): the agent may change files only while
+ *     the checked-out branch matches `scope.branches`, which defaults to the
+ *     feature branches of its issue. On such a branch it may also commit: the
+ *     sandbox opens `.git` to Bash except for the files that would let a
+ *     command switch branches or alter another one.
  *
  * Two details of the scope deviate from the literal text of issue #11, because
  * the concrete memory store (#8) and scope hook (#7) that landed after the
@@ -63,6 +67,7 @@ import type { Options, Query } from '@anthropic-ai/claude-agent-sdk';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { createAgentIdentity } from '../identity/factory.js';
+import { readBranchState, type BranchState } from '../git/branch-state.js';
 import type { AgentIdentity, AgentScope, MemoryNamespaceScope } from '../identity/types.js';
 import type { AuditLogger } from '../hooks/audit-logger.js';
 import {
@@ -88,6 +93,7 @@ import {
   isBashSandboxAvailable,
   type BashSandboxEnvironment,
 } from '../sandbox/bash-sandbox.js';
+import { resolveBashGitAccess, type BashGitAccess } from '../sandbox/git-access.js';
 import { PROTECTED_PROJECT_GLOBS } from '../sandbox/protected-paths.js';
 import { systemBashSandboxEnvironment } from '../sandbox/system-environment.js';
 
@@ -171,8 +177,24 @@ export const CODE_AGENT_STANDARDS: readonly string[] = [
   'documentation-standards/commit-conventions',
 ];
 
-/** The default branch a Code Agent is scoped to when the caller names none. */
-const DEFAULT_CODE_AGENT_BRANCHES: readonly string[] = ['main'];
+/**
+ * Branch scope for an agent launched with no issue to derive one from: any
+ * branch named like a feature branch (`{issue}/{description}`). It matches no
+ * single-segment name, so `main` is never in scope by default.
+ */
+export const ANY_FEATURE_BRANCH = '*/*';
+
+/**
+ * The branches a Code Agent is scoped to when the caller names none: the
+ * feature branches of the issue it is working on (`{issue}/*`, the project's
+ * branch-naming convention), or any feature branch when there is no issue.
+ *
+ * Never `main`: work reaches `main` through a reviewed pull request, so an
+ * agent has no reason to be writing there.
+ */
+export function defaultCodeAgentBranches(issue: string | undefined): readonly string[] {
+  return [issue !== undefined && issue.length > 0 ? `${issue}/*` : ANY_FEATURE_BRANCH];
+}
 
 /** Caller-supplied inputs for constructing a Code Agent identity. */
 export interface CodeAgentIdentityOptions {
@@ -189,7 +211,10 @@ export interface CodeAgentIdentityOptions {
    * Explicit identity id. Defaults to a generated `agent:code-agent:{uuid}`.
    */
   readonly id?: string;
-  /** Git branches the agent may work on. Defaults to `["main"]`. */
+  /**
+   * Git branches the agent may work on, as globs. Defaults to the feature
+   * branches of `issue` (see {@link defaultCodeAgentBranches}).
+   */
   readonly branches?: readonly string[];
   /** The spawning parent's delegation chain, appended to for this agent. */
   readonly parentDelegationChain?: readonly string[];
@@ -214,7 +239,7 @@ export function createCodeAgentIdentity(
   const scope: AgentScope = {
     issues: [options.issue],
     files: CODE_AGENT_FILE_SCOPE,
-    branches: options.branches ?? DEFAULT_CODE_AGENT_BRANCHES,
+    branches: options.branches ?? defaultCodeAgentBranches(options.issue),
     tools: CODE_AGENT_TOOLS,
     memoryNamespaces: CODE_AGENT_MEMORY_NAMESPACES,
   };
@@ -250,6 +275,7 @@ export function buildCodeAgentSystemPrompt(identity: AgentIdentity): string {
     'You are the Code Agent, a software implementation specialist in the Saor SDLC platform.',
     `Your purpose: ${identity.purpose}`,
     `You may create and edit files only within: ${files}. Attempts to write elsewhere are blocked and audited — do not try to work around this.`,
+    `You may work only while one of these branches is checked out: ${identity.scope.branches.join(', ')}. You may commit to the branch that is checked out. You cannot switch branches, change any other branch, or push — do not try.`,
     'Shell commands run in a sandbox: they cannot change files outside that boundary (build output aside), cannot read credentials or the .sdlc directory, and have no network access. A command that fails for one of these reasons is working as intended.',
     'Use the memory tools to record durable learnings and to read project conventions and context before you start.',
     `Resolve and follow the standards that apply to your work: ${standards}. Use resolve_ref to read them.`,
@@ -307,6 +333,24 @@ export const CODE_AGENT_READ_DENY_RULES: readonly string[] = PROTECTED_PROJECT_G
   (glob) => `Read(./${glob})`,
 );
 
+/**
+ * The `git` part of the sandbox input: present when the agent may commit on the
+ * branch checked out at launch, absent (leaving `.git` unwritable) otherwise.
+ */
+function gitAccessFor(
+  projectRoot: string,
+  identity: AgentIdentity,
+  environment: BashSandboxEnvironment,
+): { git?: BashGitAccess } {
+  const git = resolveBashGitAccess({
+    projectRoot,
+    branchScope: identity.scope.branches,
+    readTextFile: environment.readTextFile,
+    listDirectory: environment.listDirectory,
+  });
+  return git !== undefined ? { git } : {};
+}
+
 /** The Code Agent's default model. */
 export const CODE_AGENT_DEFAULT_MODEL = 'sonnet';
 
@@ -325,6 +369,12 @@ export const CODE_AGENT_DEFAULT_MODEL = 'sonnet';
  *     settings are omitted and Bash is withheld instead: dropped from
  *     `allowedTools`, added to `disallowedTools`, and denied by the scope hook.
  *   - disallowedTools: `Read(...)` deny rules for the protected paths.
+ *
+ * The checked-out branch is read twice, for two different jobs. The scope hook
+ * reads it before every write, to decide whether the agent may write at all.
+ * The sandbox settings are built once, here, from the branch at launch: if it
+ * is in scope, Bash is given the limited `.git` access that makes commits
+ * possible (see ../sandbox/git-access.ts).
  *   - mcpServers: the memory and reference-resolver in-process servers, keyed
  *     by their server names so the granted `mcp__…` tool names line up.
  *   - allowedTools: the same allowlist the scope hook enforces, so the SDK and
@@ -338,11 +388,15 @@ export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Opti
   const environment = config.bashSandboxEnvironment ?? systemBashSandboxEnvironment();
   const isBashSandboxed = isBashSandboxAvailable(environment);
 
+  const readCurrentBranch = (directory: string): BranchState =>
+    readBranchState(directory, environment.readTextFile);
+
   const hookConfig = {
     identity,
     auditLogger,
     projectId,
     isBashSandboxed,
+    readCurrentBranch,
     ...(config.now !== undefined ? { now: config.now } : {}),
     ...(config.generateEventId !== undefined
       ? { generateEventId: config.generateEventId }
@@ -374,6 +428,7 @@ export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Opti
           sandbox: buildBashSandboxSettings({
             projectRoot: config.cwd,
             realProjectRoot: environment.realPath(config.cwd),
+            ...gitAccessFor(config.cwd, identity, environment),
             writableGlobs: identity.scope.files,
             buildOutputDirs: BASH_BUILD_OUTPUT_DIRS,
             homeDir: environment.homeDir,

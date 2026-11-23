@@ -32,6 +32,7 @@ export type {
 // its declared scope.
 export {
   createScopeEnforcementHook,
+  branchIsInScope,
   evaluateToolCall,
   extractReadTargets,
   isProtectedPath,
@@ -112,6 +113,8 @@ export {
   CODE_AGENT_STANDARDS,
   CODE_AGENT_DEFAULT_MODEL,
   CODE_AGENT_READ_DENY_RULES,
+  ANY_FEATURE_BRANCH,
+  defaultCodeAgentBranches,
 } from './definitions/code-agent.js';
 export type {
   CodeAgentIdentityOptions,
@@ -140,3 +143,15 @@ export {
   createSandboxViolationAuditHook,
   extractSandboxViolations,
 } from './hooks/sandbox-violation-audit.js';
+
+// Branch scope (issue #58, ADR-011): reading what a repository has checked out,
+// and deciding whether an agent's sandboxed Bash may commit to it.
+export {
+  parsePackedBranchNames,
+  readBranchState,
+  resolveGitDir,
+} from './git/branch-state.js';
+export type { BranchState, ReadTextFile } from './git/branch-state.js';
+export { listLooseBranchNames, resolveBashGitAccess } from './sandbox/git-access.js';
+export type { BashGitAccess, GitAccessInput } from './sandbox/git-access.js';
+export { gitDeniedWritePaths } from './sandbox/bash-sandbox.js';
