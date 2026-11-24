@@ -1,3 +1,5 @@
+// src-tauri/tests/acceptance/issue_005_audit_store.rs
+//
 // Acceptance: issue #5 — JSONL audit store.
 //
 // Definition of done: every logged event is appended as one JSON line to a
@@ -8,9 +10,19 @@
 // Real store: JSONL files in a temp directory. The tests read events back
 // through the store and also read the raw files, so a store that only
 // remembered events in memory could not pass.
+//
+// Two limits of what this file pins, both because the store takes the day from
+// the system clock and offers no way to set it:
+//   - A day file's name is checked to be a real calendar date, not to be the
+//     *right* date. Events on different days are simulated by writing the
+//     earlier days' files by hand.
+//   - The tests never assume all of "today's" events share one file, so a run
+//     that straddles midnight UTC still passes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use chrono::NaiveDate;
 
 use saor_lib::audit::{AuditEvent, AuditEventType, AuditResult, FileSystemAuditStore};
 
@@ -50,18 +62,21 @@ fn audit_files(project_root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// True for a `YYYY-MM-DD.jsonl` file name.
+/// True for a `YYYY-MM-DD.jsonl` file name whose stem is a real calendar date.
 fn is_day_file(path: &Path) -> bool {
-    let name = path.file_name().unwrap().to_str().unwrap();
-    let Some(day) = name.strip_suffix(".jsonl") else {
-        return false;
-    };
-    let parts: Vec<&str> = day.split('-').collect();
-    parts.len() == 3
-        && [4, 2, 2]
-            .iter()
-            .zip(&parts)
-            .all(|(len, part)| part.len() == *len && part.chars().all(|c| c.is_ascii_digit()))
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .is_some_and(|day| day.len() == 10 && NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok())
+}
+
+/// Every line of every audit file, in file-name order: the whole trail as it
+/// is on disk.
+fn raw_trail(project_root: &Path) -> String {
+    audit_files(project_root)
+        .iter()
+        .map(|file| fs::read_to_string(file).unwrap())
+        .collect()
 }
 
 #[test]
@@ -86,12 +101,16 @@ fn logged_events_land_as_json_lines_in_a_day_file_and_read_back_in_order() {
     assert_eq!(events[0].delegation_chain[0], "human:kevin");
     assert_eq!(events[0].details["toolUseId"], "e1");
 
-    // Read the raw file: one day file, one JSON object per line, in the
+    // Read the raw files: only day files, one JSON object per line, in the
     // camelCase / dot-notation wire format the TypeScript layer shares.
     let files = audit_files(project.path());
-    assert_eq!(files.len(), 1);
-    assert!(is_day_file(&files[0]), "{}", files[0].display());
-    let raw = fs::read_to_string(&files[0]).unwrap();
+    assert!(!files.is_empty());
+    for file in &files {
+        assert!(is_day_file(file), "{}", file.display());
+    }
+    assert!(!is_day_file(Path::new("2026-13-45.jsonl")));
+    assert!(!is_day_file(Path::new("audit.jsonl")));
+    let raw = raw_trail(project.path());
     let lines: Vec<serde_json::Value> = raw
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -110,7 +129,8 @@ fn the_trail_is_append_only_across_store_instances() {
         .unwrap()
         .log(&event("from-first-run", "session-a"))
         .unwrap();
-    let after_first_run = fs::read_to_string(&audit_files(project.path())[0]).unwrap();
+    let after_first_run = raw_trail(project.path());
+    assert_eq!(after_first_run.lines().count(), 1);
 
     // A later run opens the same project and logs again.
     let second_run = FileSystemAuditStore::new(project.path()).unwrap();
@@ -118,11 +138,12 @@ fn the_trail_is_append_only_across_store_instances() {
         .log(&event("from-second-run", "session-b"))
         .unwrap();
 
-    let after_second_run = fs::read_to_string(&audit_files(project.path())[0]).unwrap();
+    let after_second_run = raw_trail(project.path());
     assert!(
         after_second_run.starts_with(&after_first_run),
         "the first run's bytes are untouched and the new event follows them"
     );
+    assert_eq!(after_second_run.lines().count(), 2);
     assert_eq!(
         ids(&second_run.get_recent(10).unwrap()),
         ["from-second-run", "from-first-run"],
@@ -154,11 +175,17 @@ fn events_from_earlier_day_files_precede_todays() {
         ids(&store.get_by_session("session-a").unwrap()),
         ["first-day", "second-day", "today"]
     );
-    assert_eq!(ids(&store.get_recent(1).unwrap()), ["today"]);
+    // get_recent walks back across day files, newest first, and its limit
+    // cuts from the old end.
+    assert_eq!(
+        ids(&store.get_recent(10).unwrap()),
+        ["today", "second-day", "first-day"]
+    );
+    assert_eq!(ids(&store.get_recent(2).unwrap()), ["today", "second-day"]);
 }
 
 #[test]
-fn a_corrupt_line_is_reported_and_costs_no_other_event() {
+fn a_malformed_line_is_reported_and_costs_no_other_event() {
     let project = tempfile::tempdir().unwrap();
     let store = FileSystemAuditStore::new(project.path()).unwrap();
     store.log(&event("before", "session-a")).unwrap();
@@ -166,10 +193,12 @@ fn a_corrupt_line_is_reported_and_costs_no_other_event() {
     // Negative control: a clean trail reports no corruption.
     assert!(store.corruption_report().unwrap().is_empty());
 
-    // A torn write, as a crash mid-append would leave it.
-    let file = audit_files(project.path()).remove(0);
+    // A complete line that is not a valid event, as a manual edit or an older
+    // schema would leave it. (A write torn by a crash is a different case: it
+    // has no trailing newline. This test does not cover it.)
+    let file = audit_files(project.path()).pop().unwrap();
     let mut raw = fs::read_to_string(&file).unwrap();
-    raw.push_str("{\"id\":\"torn\",\"timestamp\":\n");
+    raw.push_str("{\"id\":\"malformed\",\"timestamp\":\n");
     fs::write(&file, raw).unwrap();
     store.log(&event("after", "session-a")).unwrap();
 

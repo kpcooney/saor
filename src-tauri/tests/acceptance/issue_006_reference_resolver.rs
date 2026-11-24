@@ -1,9 +1,15 @@
+// src-tauri/tests/acceptance/issue_006_reference_resolver.rs
+//
 // Acceptance: issue #6 — reference resolver.
 //
 // Definition of done: a reference URI from a manifest resolves to the living
 // document it names — a project file, a standard (project override before
 // system default), or a memory query — and a URI that names anything outside
 // those roots, or uses a scheme the resolver does not serve, is refused.
+//
+// "Outside those roots" here means reached with `..` segments. A symlink
+// inside the project that points elsewhere is followed; the resolver documents
+// that as outside its threat model, and this file does not claim otherwise.
 //
 // Real stores: a project directory, a standards directory and a SQLite memory
 // file, all in a temp directory. Every refusal is paired with a file that
@@ -62,6 +68,7 @@ fn workspace() -> Workspace {
             .unwrap();
         for (id, content) in [
             ("auth-jwt", "auth tokens are JWT signed with RS256"),
+            ("auth-sessions", "auth sessions expire after an hour"),
             ("audit-jsonl", "audit events are JSON lines"),
         ] {
             store
@@ -102,7 +109,7 @@ impl Workspace {
 }
 
 #[test]
-fn a_file_uri_resolves_to_the_project_file_and_never_to_anything_outside_the_project() {
+fn a_file_uri_resolves_to_the_project_file_and_cannot_climb_out_of_the_project() {
     let ws = workspace();
 
     assert_eq!(ws.content("file:///docs/adr/001-foo.md"), "# ADR 001");
@@ -158,7 +165,13 @@ fn a_standards_uri_resolves_through_the_override_chain() {
         ws.resolve("standards://coding-standards/cobol"),
         Err(ResolverError::NotFound { .. })
     ));
+    // A real file sits where the URI points in each tier, so neither tier
+    // refuses merely because nothing is there.
     write(&ws.standards_root.join("../secret.md"), "outside standards");
+    write(
+        &ws.project_root.join(".sdlc/secret.md"),
+        "outside the project's standards overrides",
+    );
     assert!(matches!(
         ws.resolve("standards://../secret"),
         Err(ResolverError::PathTraversal { .. })
@@ -174,6 +187,17 @@ fn a_memory_uri_resolves_to_the_entries_matching_its_query() {
             let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
             assert_eq!(ids, ["auth-jwt"]);
             assert_eq!(entries[0].content, "auth tokens are JWT signed with RS256");
+        }
+        other => panic!("expected memory entries, got {other:?}"),
+    }
+
+    // `+` joins terms that must all match: the entry with "auth" but not
+    // "jwt" is left out here and found when asked for by "auth" alone.
+    match ws.resolve("memory://query/auth") {
+        Ok(ResolvedReference::MemoryEntries(entries)) => {
+            let mut ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+            ids.sort_unstable();
+            assert_eq!(ids, ["auth-jwt", "auth-sessions"]);
         }
         other => panic!("expected memory entries, got {other:?}"),
     }

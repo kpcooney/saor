@@ -1,3 +1,5 @@
+// src-tauri/tests/acceptance/issue_004_memory_store.rs
+//
 // Acceptance: issue #4 — SQLite memory store with FTS5 keyword search.
 //
 // Definition of done: knowledge an agent writes is durable in the project's
@@ -74,6 +76,39 @@ fn a_written_entry_survives_reopening_the_database_with_every_field_intact() {
         reopened.read_entry("entry-never-written"),
         Err(MemoryError::NotFound(id)) if id == "entry-never-written"
     ));
+}
+
+#[test]
+fn opening_an_existing_database_again_changes_nothing_in_it() {
+    let project = tempfile::tempdir().unwrap();
+    open_store(project.path())
+        .write_entry(&entry(
+            "kept",
+            MemoryCategory::Learning,
+            "schema setup is idempotent",
+        ))
+        .unwrap();
+
+    // Each open runs schema initialization and project registration again.
+    for _ in 0..3 {
+        let store = open_store(project.path());
+        assert_eq!(ids(&store.search("idempotent", 10).unwrap()), ["kept"]);
+        assert_eq!(
+            ids(&store
+                .recent_by_category(&MemoryCategory::Learning, 10)
+                .unwrap()),
+            ["kept"],
+            "exactly one copy: reopening neither dropped nor duplicated the entry"
+        );
+    }
+
+    // Negative control: a different project's database starts empty, so the
+    // entry above came from this file and not from setup.
+    let other = tempfile::tempdir().unwrap();
+    assert!(open_store(other.path())
+        .search("idempotent", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -165,7 +200,14 @@ fn an_entry_for_an_unregistered_project_is_refused_and_leaves_nothing_behind() {
 
     let mut orphan = entry("orphan", MemoryCategory::Learning, "orphaned knowledge");
     orphan.project_id = "proj-never-registered".to_string();
-    assert!(store.write_entry(&orphan).is_err());
+    // The refusal is the database's foreign key, not some unrelated failure.
+    match store.write_entry(&orphan) {
+        Err(MemoryError::Database(error)) => assert!(
+            error.to_string().contains("FOREIGN KEY"),
+            "expected a foreign-key refusal, got: {error}"
+        ),
+        other => panic!("expected a database refusal, got {other:?}"),
+    }
 
     assert!(matches!(
         store.read_entry("orphan"),
