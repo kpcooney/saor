@@ -22,7 +22,8 @@ All commands run from this directory (`src-tauri/`).
 
 ```bash
 cargo build           # compile
-cargo test            # run tests
+cargo test            # run all tests: unit, integration, and the acceptance tier
+cargo test --test acceptance   # acceptance tier only (tests/acceptance/, one module per issue)
 cargo clippy          # lint (warnings treated as errors in CI)
 cargo fmt --check     # check formatting
 ```
