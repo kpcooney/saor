@@ -11,6 +11,8 @@ import { accessSync, constants, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+import { readTextFileOrUndefined } from '../git/system-git.js';
+
 import type { BashSandboxEnvironment } from './bash-sandbox.js';
 
 /** Whether an executable named `name` exists in a directory on the PATH. */
@@ -56,5 +58,6 @@ export function systemBashSandboxEnvironment(): BashSandboxEnvironment {
     homeDir: homedir(),
     listDirectory: listDirectoryOrEmpty,
     realPath: realPathOrSame,
+    readTextFile: readTextFileOrUndefined,
   };
 }
