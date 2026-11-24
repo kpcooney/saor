@@ -18,7 +18,7 @@
 // for the FileSystemAuditStore design and the SqliteAuditStore upgrade path.
 
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -54,25 +54,45 @@ impl FileSystemAuditStore {
     /// The file is created if it doesn't exist. Each event is a single
     /// line — no multi-line records.
     ///
+    /// Torn lines: a crash mid-write can leave the file ending in a
+    /// partial line with no trailing newline. Appending straight onto
+    /// that fragment would glue the new event to it, and the combined
+    /// line would fail to parse — losing a valid event. So when the
+    /// file is non-empty and does not end in a newline, the write
+    /// starts with one. The fragment stays on its own line (still
+    /// reported by `corruption_report()`) and the new event lands
+    /// intact on the next.
+    ///
     /// Concurrency: Phase 1 runs a single agent at a time, so this
-    /// method does not implement explicit serialization. POSIX `O_APPEND`
-    /// makes a single `write()` call atomic only up to `PIPE_BUF`
-    /// (~4 KiB on most systems), and `writeln!` may issue multiple
-    /// writes for a large event — so concurrent multi-process callers
-    /// could interleave a single event's bytes. Adding a `Mutex<File>`
-    /// or a single `write_all` of a pre-built buffer is deferred until
+    /// method does not implement explicit serialization. The separator
+    /// and the event go out as one `write_all` of a pre-built buffer,
+    /// but POSIX `O_APPEND` makes a single `write()` call atomic only
+    /// up to `PIPE_BUF` (~4 KiB on most systems) and `write_all` may
+    /// issue several for a large event — so concurrent multi-process
+    /// callers could still interleave a single event's bytes. The
+    /// torn-line check is likewise check-then-write, not atomic with
+    /// the append. A `Mutex<File>` or file lock is deferred until
     /// concurrent agents become a real Phase 2 requirement.
     pub fn log(&self, event: &AuditEvent) -> Result<(), AuditError> {
         let filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
         let file_path = self.audit_dir.join(filename);
 
+        // `read` is needed only to inspect the last byte; `append`
+        // still sends every write to the end of the file.
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&file_path)?;
 
         let json = serde_json::to_string(event)?;
-        writeln!(file, "{json}")?;
+        let mut line = String::with_capacity(json.len() + 2);
+        if ends_with_unterminated_line(&mut file)? {
+            line.push('\n');
+        }
+        line.push_str(&json);
+        line.push('\n');
+        file.write_all(line.as_bytes())?;
 
         Ok(())
     }
@@ -214,6 +234,19 @@ impl FileSystemAuditStore {
 
         Ok((events, malformed))
     }
+}
+
+/// Reports whether `file` is non-empty and its last byte is not a
+/// newline — i.e. it ends in a partial line left by an interrupted
+/// write. An empty file has no line to terminate, so it returns false.
+fn ends_with_unterminated_line(file: &mut fs::File) -> Result<bool, AuditError> {
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last_byte = [0u8; 1];
+    file.read_exact(&mut last_byte)?;
+    Ok(last_byte[0] != b'\n')
 }
 
 #[cfg(test)]
@@ -544,6 +577,75 @@ mod tests {
             !report[0].error.is_empty(),
             "expected a non-empty parse-error message"
         );
+    }
+
+    #[test]
+    fn test_log_after_unterminated_line_keeps_the_new_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        store
+            .log(&test_event(
+                "evt-before",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+
+        // Simulate a write cut off by a crash: a partial event with no
+        // trailing newline at the end of today's file.
+        let today_filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
+        let today_path = tmp.path().join(".sdlc").join("audit").join(&today_filename);
+        let mut file = OpenOptions::new().append(true).open(&today_path).unwrap();
+        file.write_all(br#"{"id":"torn","timestamp":"#).unwrap();
+        drop(file);
+
+        store
+            .log(&test_event(
+                "evt-after",
+                "session-1",
+                "agent-1",
+                AuditEventType::FileWrite,
+            ))
+            .unwrap();
+
+        // The event logged after the torn fragment must survive.
+        let events = store.get_by_session("session-1").unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["evt-before", "evt-after"]
+        );
+
+        // The fragment itself is still reported, on its own line.
+        let report = store.corruption_report().unwrap();
+        assert_eq!(report.len(), 1, "expected only the torn fragment");
+        assert_eq!(report[0].line_number, 2);
+    }
+
+    #[test]
+    fn test_log_adds_no_blank_lines_to_a_cleanly_terminated_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileSystemAuditStore::new(tmp.path()).unwrap();
+
+        for i in 0..3 {
+            store
+                .log(&test_event(
+                    &format!("evt-{i}"),
+                    "session-1",
+                    "agent-1",
+                    AuditEventType::ToolInvoked,
+                ))
+                .unwrap();
+        }
+
+        let today_filename = format!("{}.jsonl", Utc::now().format("%Y-%m-%d"));
+        let today_path = tmp.path().join(".sdlc").join("audit").join(&today_filename);
+        let content = fs::read_to_string(&today_path).unwrap();
+
+        assert!(content.ends_with('\n'));
+        assert_eq!(content.lines().count(), 3);
+        assert!(content.lines().all(|line| !line.is_empty()));
     }
 
     #[test]
