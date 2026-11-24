@@ -19,3 +19,4 @@ pub mod agent;
 pub mod audit;
 pub mod memory;
 pub mod project;
+pub mod transcript;

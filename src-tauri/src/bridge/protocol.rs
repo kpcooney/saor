@@ -34,6 +34,8 @@ pub const METHOD_MEMORY_RECENT: &str = "memory.recent";
 pub const METHOD_AUDIT_LOG: &str = "audit.log";
 /// Dereference one reference-manifest URI.
 pub const METHOD_REFERENCE_RESOLVE: &str = "reference.resolve";
+/// Append one entry to the session's transcript.
+pub const METHOD_TRANSCRIPT_APPEND: &str = "transcript.append";
 
 /// A parsed request line. `params` defaults to `null` when omitted, so a
 /// method with no parameters need not send the field.
