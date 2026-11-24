@@ -12,7 +12,8 @@
  *
  * IMPORTANT — field casing follows each struct's serde attribute, not a single
  * convention:
- *   - ProjectRecord, AuditEvent, AgentSession use `rename_all = "camelCase"`.
+ *   - ProjectRecord, AuditEvent, AgentSession, TranscriptEntry use
+ *     `rename_all = "camelCase"`.
  *   - MemoryEntry has no rename attribute, so its fields stay snake_case.
  * Mirror those exactly, or `invoke()` results will have undefined fields.
  */
@@ -107,4 +108,24 @@ export interface AgentSession {
   task: string;
   status: AgentStatus;
   startedAt: string;
+}
+
+/** Mirrors `transcript::TranscriptEntryKind` (lowercase serde). */
+export type TranscriptEntryKind = "task" | "message" | "result";
+
+/**
+ * Mirrors `transcript::TranscriptEntry` (camelCase): one line of the record of
+ * what an agent was asked, said, and ended with (ADR-013).
+ */
+export interface TranscriptEntry {
+  sessionId: string;
+  timestamp: string;
+  kind: TranscriptEntryKind;
+  /** The task, what the agent said this turn, or the final answer / error. */
+  text: string;
+  /**
+   * `message`: `{ toolUseIds?: string[] }` — the tool calls made that turn.
+   * `result`: `{ isError, numTurns?, durationMs?, totalCostUsd? }`.
+   */
+  details: unknown;
 }

@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
    * AgentDashboard — start a Code Agent against the active project, watch its
-   * status, and stop it. Sessions are held in the shared store (the backend
-   * has no session-list command in Phase 1), so this view shows the sessions
-   * started during the current UI session.
+   * status, stop it, and open a session to see what it said and did
+   * (SessionDetail). Sessions are held in the shared store (the backend has no
+   * session-list command in Phase 1), so this view shows the sessions started
+   * during the current UI session.
    *
    * Status polling of active sessions lives in the app shell (+page.svelte),
    * not here, so it keeps running while the user is on the Memory or Audit tab
@@ -12,6 +13,7 @@
   import { agentStart, agentStop } from "$lib/tauri";
   import { formatTimestamp } from "$lib/format";
   import { projectStore } from "$lib/stores/project.svelte";
+  import SessionDetail from "./SessionDetail.svelte";
 
   /** The only agent type wired up in Phase 1. */
   const AGENT_TYPE = "code-agent";
@@ -20,6 +22,8 @@
   let starting = $state(false);
   let startError = $state<string | null>(null);
   let stopErrors = $state<Record<string, string>>({});
+  /** The session whose detail is open, if any. One at a time. */
+  let openSessionId = $state<string | null>(null);
 
   const project = $derived(projectStore.active);
   const sessions = $derived(projectStore.sessions);
@@ -40,6 +44,8 @@
         status: "active",
         startedAt: new Date().toISOString(),
       });
+      // Open the new session so the run can be watched from the start.
+      openSessionId = sessionId;
       task = "";
     } catch (e) {
       startError = String(e);
@@ -57,6 +63,10 @@
     } catch (e) {
       stopErrors = { ...stopErrors, [sessionId]: String(e) };
     }
+  }
+
+  function toggleDetail(sessionId: string) {
+    openSessionId = openSessionId === sessionId ? null : sessionId;
   }
 </script>
 
@@ -96,10 +106,23 @@
           {#if stopErrors[session.sessionId]}
             <p class="error">{stopErrors[session.sessionId]}</p>
           {/if}
-          {#if session.status === "active"}
-            <button type="button" class="secondary" onclick={() => stop(session.sessionId)}>
-              Stop
+          <div class="actions">
+            <button
+              type="button"
+              class="secondary"
+              aria-expanded={openSessionId === session.sessionId}
+              onclick={() => toggleDetail(session.sessionId)}
+            >
+              {openSessionId === session.sessionId ? "Hide details" : "Show details"}
             </button>
+            {#if session.status === "active"}
+              <button type="button" class="secondary" onclick={() => stop(session.sessionId)}>
+                Stop
+              </button>
+            {/if}
+          </div>
+          {#if openSessionId === session.sessionId && project}
+            <SessionDetail {session} projectPath={project.path} />
           {/if}
         </li>
       {/each}
@@ -182,7 +205,8 @@
   .task {
     margin: 0;
   }
-  button.secondary {
-    align-self: flex-start;
+  .actions {
+    display: flex;
+    gap: 0.5rem;
   }
 </style>
