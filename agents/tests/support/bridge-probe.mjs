@@ -22,6 +22,7 @@ import {
   createBridgeAuditLogger,
   createBridgeMemoryStore,
   createBridgeReferenceResolver,
+  createBridgeTranscriptRecorder,
 } from '../../dist/bridge/adapters.js';
 import { createBridgeClient } from '../../dist/bridge/client.js';
 
@@ -32,6 +33,10 @@ const client = createBridgeClient({ input: process.stdin, output: process.stdout
 const memory = createBridgeMemoryStore(client);
 const audit = createBridgeAuditLogger(client, { sessionId });
 const resolver = createBridgeReferenceResolver(client);
+const transcriptFailures = [];
+const transcript = createBridgeTranscriptRecorder(client, {
+  onDiagnostic: (message) => transcriptFailures.push(message),
+});
 
 function entry(id, category, content, forProject = projectId) {
   return {
@@ -93,6 +98,26 @@ async function probe() {
     resolver.resolve('file://docs/note.md'),
   ]);
 
+  // The session transcript (issue #78): entries are stored in the order they
+  // are recorded, without the recorder waiting on each response.
+  const at = new Date().toISOString();
+  transcript.record({ timestamp: at, kind: 'task', text: 'probe the bridge', details: {} });
+  transcript.record({
+    timestamp: at,
+    kind: 'message',
+    text: 'said with a\u2028separator',
+    details: { toolUseIds: ['tu-probe'] },
+  });
+  transcript.record({
+    timestamp: at,
+    kind: 'result',
+    text: 'probed',
+    details: { isError: false, numTurns: 1 },
+  });
+  // An entry of a kind Rust does not know is refused and reported, not thrown.
+  transcript.record({ timestamp: at, kind: 'thought', text: 'not a kind', details: {} });
+  await transcript.flush();
+
   // U+2028 and U+2029 are legal, unescaped characters in JSON. Responses that
   // carry them must arrive whole (issue #68). This runs last so the entry does
   // not disturb what the checks above observed.
@@ -103,6 +128,7 @@ async function probe() {
   const separatorFile = await resolver.resolve('file://docs/separators.md');
 
   return {
+    transcriptFailures,
     separators: {
       searchContent: separatorSearch[0]?.content,
       contextContent: separatorContext.recentLearnings.find(

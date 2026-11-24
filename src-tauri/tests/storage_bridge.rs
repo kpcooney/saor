@@ -6,7 +6,8 @@
 //
 //   - Node side: agents/tests/support/bridge-probe.mjs, which drives the
 //     compiled bridge client and the memory / audit / reference adapters
-//     (agents/dist/bridge/) through every bridge method.
+//     (agents/dist/bridge/) through every bridge method, the session
+//     transcript's included.
 //   - Rust side: this test, which plays the spawner — it reads the child's
 //     stdout line by line, hands each line to a real `BridgeHost` bound to a
 //     temp-dir project with REAL stores, and writes each response to the
@@ -32,6 +33,7 @@ use saor_lib::audit::{AuditEventType, FileSystemAuditStore};
 use saor_lib::bridge::{BridgeHost, LineOutcome};
 use saor_lib::memory::SqliteMemoryStore;
 use saor_lib::project::ProjectRegistry;
+use saor_lib::transcript::{FileSystemTranscriptStore, TranscriptEntryKind};
 
 const SESSION: &str = "session-bridge-probe";
 
@@ -238,4 +240,30 @@ fn node_adapters_round_trip_through_the_real_rust_stores() {
     // The adapter restamped the session and kept the SDK's id in details.
     assert_eq!(event.details["sdkSessionId"], "sdk-session-from-probe");
     assert_eq!(event.details["toolUseId"], "tu-probe");
+
+    // The session transcript: three entries in the order recorded, filed
+    // under the session the host is bound to. The entry of an unknown kind
+    // was refused, reported to the recorder, and left nothing behind.
+    let transcript = FileSystemTranscriptStore::new(&project_path)
+        .unwrap()
+        .read(SESSION)
+        .unwrap();
+    assert_eq!(
+        transcript.iter().map(|e| e.kind).collect::<Vec<_>>(),
+        [
+            TranscriptEntryKind::Task,
+            TranscriptEntryKind::Message,
+            TranscriptEntryKind::Result,
+        ]
+    );
+    assert_eq!(transcript[1].text, "said with a\u{2028}separator");
+    assert_eq!(transcript[1].details["toolUseIds"][0], "tu-probe");
+    assert_eq!(transcript[2].details["numTurns"], 1);
+    assert!(transcript.iter().all(|e| e.session_id == SESSION));
+    let failures = report["transcriptFailures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{report}");
+    assert!(
+        failures[0].as_str().unwrap().contains("thought"),
+        "{report}"
+    );
 }

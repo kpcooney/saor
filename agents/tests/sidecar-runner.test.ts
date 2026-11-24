@@ -3,7 +3,8 @@
  *
  * Tests for the sidecar's run logic (issue #59): launch arguments become a Code
  * Agent wired to the storage bridge, the run's outcome is reported on a status
- * line, and the exit code follows it.
+ * line, and the exit code follows it. Also that the run is recorded to the
+ * session transcript as it happens (issue #78).
  *
  * The LLM is not involved. `runSidecar` takes its agent runner as a dependency,
  * so these tests pass a scripted runner that uses the ports it is handed the
@@ -13,7 +14,7 @@
  */
 
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { CodeAgentRuntimeConfig } from '../src/definitions/code-agent.js';
 import type { AuditEvent } from '../src/hooks/audit-logger.js';
@@ -25,7 +26,11 @@ import {
   runSidecar,
   type AgentRunner,
 } from '../src/sidecar-runner.js';
-import { createFakeBridgeHost, type FakeHandler } from './support/fake-bridge-host.js';
+import {
+  createFakeBridgeHost,
+  type FakeBridgeHost,
+  type FakeHandler,
+} from './support/fake-bridge-host.js';
 
 const LAUNCH_ARGV = [
   '--session',
@@ -49,6 +54,23 @@ function resultMessage(fields: Record<string, unknown>): SDKMessage {
 }
 
 const SUCCESS = resultMessage({ subtype: 'success', is_error: false, num_turns: 3, result: 'ok' });
+
+/** An assistant message with the given content blocks. */
+function assistantMessage(content: readonly Record<string, unknown>[]): SDKMessage {
+  return {
+    type: 'assistant',
+    session_id: 'sdk-session-abc',
+    parent_tool_use_id: null,
+    message: { role: 'assistant', content },
+  } as unknown as SDKMessage;
+}
+
+/** The transcript entries a fake host received, in order. */
+function transcriptEntries(host: FakeBridgeHost): Record<string, unknown>[] {
+  return host.requests
+    .filter((request) => request.method === 'transcript.append')
+    .map((request) => (request.params as { entry: Record<string, unknown> }).entry);
+}
 
 /** A runner that yields the given messages and records the config it was given. */
 function scriptedRunner(messages: readonly SDKMessage[]) {
@@ -159,13 +181,14 @@ describe('runSidecar', () => {
     const { host, exitCode } = await run(runAgent, LAUNCH_ARGV, handler);
 
     expect(exitCode).toBe(EXIT_COMPLETED);
-    expect(host.requests.map((request) => request.method)).toEqual([
+    const portRequests = host.requests.filter((request) => request.method !== 'transcript.append');
+    expect(portRequests.map((request) => request.method)).toEqual([
       'audit.log',
       'memory.search',
       'reference.resolve',
     ]);
     // The audit event carries the Saor session id, not the SDK's.
-    expect(host.requests[0]!.params).toMatchObject({
+    expect(portRequests[0]!.params).toMatchObject({
       event: { sessionId: 'session-1', details: { sdkSessionId: 'sdk-session-abc' } },
     });
     expect(observed).toEqual([
@@ -236,5 +259,107 @@ describe('runSidecar', () => {
     expect(seen.config).toBeUndefined();
     expect(host.statuses.map((status) => status['status'])).toEqual(['failed']);
     expect(host.statuses[0]!['error']).toContain('missing required launch argument');
+  });
+});
+
+describe('runSidecar transcript', () => {
+  it('records the task, what the agent says, and the outcome, in order', async () => {
+    const { runAgent } = scriptedRunner([
+      assistantMessage([
+        { type: 'text', text: 'I will look at the project first.' },
+        { type: 'tool_use', id: 'tu-1', name: 'Bash', input: { command: 'ls' } },
+      ]),
+      assistantMessage([{ type: 'tool_use', id: 'tu-2', name: 'Write', input: {} }]),
+      resultMessage({
+        subtype: 'success',
+        is_error: false,
+        num_turns: 3,
+        duration_ms: 24000,
+        total_cost_usd: 0.012,
+        result: 'Created README.md.',
+      }),
+    ]);
+
+    const { host } = await run(runAgent);
+
+    const entries = transcriptEntries(host);
+    expect(entries.map((entry) => entry['kind'])).toEqual(['task', 'message', 'message', 'result']);
+    expect(entries[0]).toMatchObject({ text: 'Add a README', details: {} });
+    expect(entries[1]).toMatchObject({
+      text: 'I will look at the project first.',
+      details: { toolUseIds: ['tu-1'] },
+    });
+    expect(entries[2]).toMatchObject({ text: '', details: { toolUseIds: ['tu-2'] } });
+    expect(entries[3]).toMatchObject({
+      text: 'Created README.md.',
+      details: { isError: false, numTurns: 3, durationMs: 24000, totalCostUsd: 0.012 },
+    });
+    // The sidecar never names a session; Rust files entries under its own.
+    expect(entries.every((entry) => !('sessionId' in entry))).toBe(true);
+    expect(entries.every((entry) => !Number.isNaN(Date.parse(String(entry['timestamp']))))).toBe(
+      true,
+    );
+  });
+
+  it('stores the outcome before it reports the run finished', async () => {
+    const order: string[] = [];
+    const host = createFakeBridgeHost((request) => {
+      order.push(request.method);
+      return { ok: true, result: null };
+    });
+    const { runAgent } = scriptedRunner([SUCCESS]);
+
+    await runSidecar({ argv: LAUNCH_ARGV, input: host.input, output: host.output, runAgent });
+    await expect.poll(() => host.statuses.at(-1)?.['status']).toBe('completed');
+
+    // Both appends were answered while only `started` had been reported.
+    expect(order).toEqual(['transcript.append', 'transcript.append']);
+    expect(transcriptEntries(host).at(-1)).toMatchObject({ kind: 'result', text: 'ok' });
+  });
+
+  it('records a failed run with its error as the outcome', async () => {
+    const runAgent: AgentRunner = async function* () {
+      yield assistantMessage([{ type: 'text', text: 'Starting.' }]);
+      throw new Error('could not reach the model');
+    };
+
+    const { host, exitCode } = await run(runAgent);
+
+    expect(exitCode).toBe(EXIT_FAILED);
+    const entries = transcriptEntries(host);
+    expect(entries.map((entry) => entry['kind'])).toEqual(['task', 'message', 'result']);
+    expect(entries[2]).toMatchObject({
+      text: 'could not reach the model',
+      details: { isError: true },
+    });
+    // A run that threw has no SDK accounting to report.
+    expect(entries[2]!['details']).not.toHaveProperty('numTurns');
+  });
+
+  it('completes the run even when the transcript cannot be stored', async () => {
+    const diagnostics = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const handler: FakeHandler = (request) =>
+      request.method === 'transcript.append'
+        ? { ok: false, code: 'store_error', message: 'disk full' }
+        : { ok: true, result: null };
+    const { runAgent } = scriptedRunner([
+      assistantMessage([{ type: 'text', text: 'Working.' }]),
+      SUCCESS,
+    ]);
+
+    const { host, exitCode } = await run(runAgent, LAUNCH_ARGV, handler);
+
+    expect(exitCode).toBe(EXIT_COMPLETED);
+    expect(host.statuses.at(-1)).toMatchObject({ status: 'completed' });
+    expect(diagnostics).toHaveBeenCalledWith(expect.stringContaining('disk full'));
+    diagnostics.mockRestore();
+  });
+
+  it('records nothing for a launch that was refused', async () => {
+    const { runAgent } = scriptedRunner([SUCCESS]);
+
+    const { host } = await run(runAgent, ['--session', 'session-1']);
+
+    expect(transcriptEntries(host)).toEqual([]);
   });
 });

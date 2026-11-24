@@ -13,13 +13,18 @@
  * What the Rust side sees on stdout, in order:
  *
  *   1. a `started` status line
- *   2. bridge requests, as the agent's hooks and MCP tools use the stores
+ *   2. bridge requests, as the agent's hooks and MCP tools use the stores and
+ *      as the run's transcript is recorded
  *   3. a `completed` or `failed` status line
  *
  * and then the process exits with code 0 or 1. Rust records the lifecycle audit
  * events (`agent.created`, then `agent.completed` / `agent.failed`) from what it
  * observes — the spawn, the `failed` status line's error, and the exit code —
  * so this module does not log them itself.
+ *
+ * The transcript (issue #78, ADR-013) is this module's own record of the run:
+ * the task, each thing the agent says, and the outcome, sent to the Rust
+ * transcript store as they happen so the UI can show a run in progress.
  */
 
 import type { Readable, Writable } from 'node:stream';
@@ -30,6 +35,7 @@ import {
   createBridgeAuditLogger,
   createBridgeMemoryStore,
   createBridgeReferenceResolver,
+  createBridgeTranscriptRecorder,
 } from './bridge/adapters.js';
 import { createBridgeClient, type BridgeClient } from './bridge/client.js';
 import {
@@ -37,6 +43,13 @@ import {
   createCodeAgentIdentity,
   type CodeAgentRuntimeConfig,
 } from './definitions/code-agent.js';
+import {
+  messageEntryFrom,
+  resultEntry,
+  taskEntry,
+  type RunResultSummary,
+  type TranscriptRecorder,
+} from './transcript/entries.js';
 
 /** The launch arguments passed by the Rust spawner (process/spawner.rs). */
 export interface SidecarArgs {
@@ -85,10 +98,18 @@ export interface SidecarDeps {
   readonly runAgent: AgentRunner;
 }
 
-/** How an agent run ended, as far as the sidecar could tell. */
-type RunOutcome =
-  | { readonly ok: true; readonly numTurns: number }
-  | { readonly ok: false; readonly error: string };
+/**
+ * How an agent run ended, as far as the sidecar could tell. The accounting
+ * fields are present when the SDK reported a final `result` message.
+ */
+interface RunOutcome {
+  readonly ok: boolean;
+  /** The agent's final answer when `ok`, otherwise the error. */
+  readonly text: string;
+  readonly numTurns?: number;
+  readonly durationMs?: number;
+  readonly totalCostUsd?: number;
+}
 
 /**
  * Parse `--flag value` pairs from argv into the known launch arguments.
@@ -172,29 +193,51 @@ function describeError(error: unknown): string {
 }
 
 /**
- * Drain the agent's message stream and derive the outcome from its final
- * `result` message. A stream that ends without one is a failure — the run did
- * not finish in a way the SDK reported.
+ * Drain the agent's message stream: record what the agent says to the
+ * transcript as it arrives, and derive the outcome from the final `result`
+ * message. A stream that ends without one is a failure — the run did not
+ * finish in a way the SDK reported.
  */
-async function awaitOutcome(messages: AsyncIterable<SDKMessage>): Promise<RunOutcome> {
+async function awaitOutcome(
+  messages: AsyncIterable<SDKMessage>,
+  transcript: TranscriptRecorder,
+): Promise<RunOutcome> {
   let outcome: RunOutcome = {
     ok: false,
-    error: 'the agent run ended without reporting a result',
+    text: 'the agent run ended without reporting a result',
   };
   for await (const message of messages) {
+    const entry = messageEntryFrom(message, new Date());
+    if (entry !== undefined) {
+      transcript.record(entry);
+    }
     if (message.type !== 'result') {
       continue;
     }
-    if (message.subtype === 'success' && !message.is_error) {
-      outcome = { ok: true, numTurns: message.num_turns };
-    } else if (message.subtype === 'success') {
-      outcome = { ok: false, error: message.result };
+    const accounting = {
+      numTurns: message.num_turns,
+      durationMs: message.duration_ms,
+      totalCostUsd: message.total_cost_usd,
+    };
+    if (message.subtype === 'success') {
+      outcome = { ok: !message.is_error, text: message.result, ...accounting };
     } else {
       const detail = message.errors.join('; ');
-      outcome = { ok: false, error: detail.length > 0 ? detail : message.subtype };
+      outcome = { ok: false, text: detail.length > 0 ? detail : message.subtype, ...accounting };
     }
   }
   return outcome;
+}
+
+/** The transcript's closing entry for an outcome. */
+function summarize(outcome: RunOutcome): RunResultSummary {
+  return {
+    text: outcome.text,
+    isError: !outcome.ok,
+    ...(outcome.numTurns !== undefined ? { numTurns: outcome.numTurns } : {}),
+    ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
+    ...(outcome.totalCostUsd !== undefined ? { totalCostUsd: outcome.totalCostUsd } : {}),
+  };
 }
 
 /**
@@ -215,21 +258,27 @@ export async function runSidecar(deps: SidecarDeps): Promise<number> {
     }
 
     client.sendStatus('started', { ...identifiers, pid: process.pid });
-
+    const transcript = createBridgeTranscriptRecorder(client);
+    transcript.record(taskEntry(args.task, new Date()));
     let outcome: RunOutcome;
     try {
       outcome = await awaitOutcome(
         deps.runAgent(args.task, buildSidecarRuntimeConfig(args, client)),
+        transcript,
       );
     } catch (error) {
-      outcome = { ok: false, error: describeError(error) };
+      outcome = { ok: false, text: describeError(error) };
     }
-
+    // The outcome is the last transcript entry, and it is stored before the
+    // final status line: once Rust sees that line the run is over, and a
+    // reader of the transcript should find it complete.
+    transcript.record(resultEntry(summarize(outcome), new Date()));
+    await transcript.flush();
     if (outcome.ok) {
       client.sendStatus('completed', { ...identifiers, numTurns: outcome.numTurns });
       return EXIT_COMPLETED;
     }
-    client.sendStatus('failed', { ...identifiers, error: outcome.error });
+    client.sendStatus('failed', { ...identifiers, error: outcome.text });
     return EXIT_FAILED;
   } finally {
     client.close();
