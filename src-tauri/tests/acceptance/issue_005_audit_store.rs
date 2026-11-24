@@ -195,7 +195,7 @@ fn a_malformed_line_is_reported_and_costs_no_other_event() {
 
     // A complete line that is not a valid event, as a manual edit or an older
     // schema would leave it. (A write torn by a crash is a different case: it
-    // has no trailing newline. This test does not cover it.)
+    // has no trailing newline. The next test covers it.)
     let file = audit_files(project.path()).pop().unwrap();
     let mut raw = fs::read_to_string(&file).unwrap();
     raw.push_str("{\"id\":\"malformed\",\"timestamp\":\n");
@@ -210,6 +210,60 @@ fn a_malformed_line_is_reported_and_costs_no_other_event() {
     assert_eq!(report.len(), 1);
     assert_eq!(report[0].file, file);
     assert_eq!(report[0].line_number, 2);
+}
+
+#[test]
+fn an_event_logged_after_a_crash_torn_line_is_not_lost() {
+    let project = tempfile::tempdir().unwrap();
+    FileSystemAuditStore::new(project.path())
+        .unwrap()
+        .log(&event("before", "session-a"))
+        .unwrap();
+
+    // A write cut off by a crash: part of an event and no trailing newline
+    // (issue #74). Unlike the malformed line above, the file now ends
+    // mid-line.
+    let torn = "{\"id\":\"torn\",\"timestamp\":";
+    let file = audit_files(project.path()).pop().unwrap();
+    let mut raw = fs::read_to_string(&file).unwrap();
+    raw.push_str(torn);
+    fs::write(&file, &raw).unwrap();
+
+    // The run after the crash opens the same project and logs again.
+    let store = FileSystemAuditStore::new(project.path()).unwrap();
+
+    // Negative control: before that log, the fragment is the last thing in the
+    // trail, already reported, and only "before" can be read.
+    assert!(raw_trail(project.path()).ends_with(torn));
+    assert_eq!(store.corruption_report().unwrap().len(), 1);
+    assert_eq!(ids(&store.get_recent(10).unwrap()), ["before"]);
+
+    store.log(&event("after", "session-a")).unwrap();
+
+    // The new event is not glued to the fragment: every query that should see
+    // it does.
+    assert_eq!(
+        ids(&store.get_by_session("session-a").unwrap()),
+        ["before", "after"]
+    );
+    assert_eq!(ids(&store.get_recent(10).unwrap()), ["after", "before"]);
+
+    // The fragment is still reported, alone, on its own line.
+    let report = store.corruption_report().unwrap();
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].file, file);
+    assert_eq!(report[0].line_number, 2);
+
+    // Read the raw file: nothing already written was touched, the fragment
+    // sits on a line by itself, and the new event is a whole line after it.
+    let after_log = fs::read_to_string(&file).unwrap();
+    assert!(after_log.starts_with(&raw));
+    assert!(after_log.ends_with('\n'));
+    let lines: Vec<&str> = after_log.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[1], torn);
+    let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(last["id"], "after");
 }
 
 #[test]
