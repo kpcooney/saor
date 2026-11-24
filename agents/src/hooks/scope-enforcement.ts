@@ -23,7 +23,13 @@
  *     sandbox configured in ../sandbox/bash-sandbox.ts. This hook's part is to
  *     refuse Bash entirely unless the caller attests that sandbox is in place.
  *
- * `scope.branches` is not enforced by this hook.
+ *   - Branch scope — a tool that can change files (the file-mutating tools and
+ *     `Bash`) is denied unless the repository's checked-out branch matches one
+ *     of the agent's `scope.branches` globs. A project that is not a git
+ *     repository has no branch, so the check does not apply to it. This hook
+ *     decides whether the agent may write *on the current branch*; what stops
+ *     it moving to, or altering, another branch is the Bash sandbox's rules for
+ *     `.git` (see ../sandbox/bash-sandbox.ts and ADR-011).
  *
  * The module is split into two layers:
  *
@@ -37,12 +43,13 @@
  *
  * Blocking is the default — the check order follows the architecture (file
  * scope, then tool allowlist, then expiry), with the read-scope check alongside
- * file scope and the Bash sandbox check alongside the allowlist. Any check
- * failing denies the tool call.
+ * file scope, and the Bash sandbox and branch checks alongside the allowlist.
+ * Any check failing denies the tool call.
  *
  * See docs/architecture/sdlc-agent-architecture-research-v4.md Section 7.4
  * for the scope enforcement logic and hook registration pattern, and
- * docs/adr/010-bash-and-read-confinement.md for the read and Bash decisions.
+ * docs/adr/010-bash-and-read-confinement.md for the read and Bash decisions,
+ * and docs/adr/011-branch-scope-enforcement.md for branch scope.
  */
 
 import { posix as posixPath } from 'node:path';
@@ -54,6 +61,8 @@ import type {
   PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 
+import { readBranchState, type BranchState } from '../git/branch-state.js';
+import { readTextFileOrUndefined } from '../git/system-git.js';
 import type { AgentIdentity } from '../identity/types.js';
 import { PROTECTED_PROJECT_GLOBS } from '../sandbox/protected-paths.js';
 import type { AuditEvent, AuditEventType, AuditLogger } from './audit-logger.js';
@@ -85,6 +94,13 @@ const PATH_READING_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob'];
 
 /** The shell tool, which is confined by the OS sandbox rather than this hook. */
 const BASH_TOOL = 'Bash';
+
+/**
+ * Tools that can change files, and are therefore held to the agent's branch
+ * scope: an agent scoped to a feature branch must not be writing while some
+ * other branch is checked out.
+ */
+const WRITE_CAPABLE_TOOLS: readonly string[] = [...FILE_MUTATING_TOOLS, BASH_TOOL];
 
 /**
  * A scope-enforcement denial. The `eventType` is one of the three security
@@ -133,6 +149,13 @@ export interface ScopeEvaluationInput {
    * agent's tool allowlist, because nothing else confines what it writes.
    */
   readonly isBashSandboxed?: boolean;
+  /**
+   * What the project has checked out, for the branch-scope check on tools that
+   * can change files. When omitted the branch is unknown and those tools are
+   * denied (fail closed); pass `{ kind: 'none' }` for a project that is not a
+   * git repository.
+   */
+  readonly currentBranch?: BranchState;
 }
 
 const ALLOW: ScopeDecision = { action: 'allow' };
@@ -143,7 +166,8 @@ const ALLOW: ScopeDecision = { action: 'allow' };
  *
  * Check order matches the architecture (Section 7.4): file scope for
  * file-mutating tools (and read scope for file-reading tools), then the tool
- * allowlist (and the Bash sandbox requirement), then credential expiry.
+ * allowlist (with the Bash sandbox requirement and the branch scope of tools
+ * that can change files), then credential expiry.
  */
 export function evaluateToolCall(input: ScopeEvaluationInput): ScopeDecision {
   const { identity, toolName, toolInput } = input;
@@ -184,6 +208,13 @@ export function evaluateToolCall(input: ScopeEvaluationInput): ScopeDecision {
         details: { tool: toolName },
       },
     };
+  }
+
+  if (WRITE_CAPABLE_TOOLS.includes(toolName)) {
+    const branchDecision = evaluateBranchScope(identity, toolName, input.currentBranch);
+    if (branchDecision.action === 'block') {
+      return branchDecision;
+    }
   }
 
   const now = input.now ?? new Date();
@@ -244,6 +275,62 @@ function evaluateFileScope(
   }
 
   return ALLOW;
+}
+
+/**
+ * Check that a tool which can change files is being used on a branch the agent
+ * is scoped to. The branch is whatever the repository has checked out — the
+ * agent cannot name a different one in the call.
+ *
+ *   - Not a git repository → no branch exists, so the scope does not apply.
+ *   - Branch unknown (the caller supplied none) → denied; an unverifiable
+ *     branch is not an in-scope branch.
+ *   - Detached HEAD → denied; there is no branch to match.
+ *   - On a branch → allowed only if it matches one of `scope.branches`.
+ */
+function evaluateBranchScope(
+  identity: AgentIdentity,
+  toolName: string,
+  currentBranch: BranchState | undefined,
+): ScopeDecision {
+  if (currentBranch?.kind === 'none') {
+    return ALLOW;
+  }
+
+  const allowedBranches = [...identity.scope.branches];
+  const blocked = (reason: string, branch?: string): ScopeDecision => ({
+    action: 'block',
+    violation: {
+      eventType: 'scope.violation',
+      action: `Attempted ${toolName} on ${branch === undefined ? 'an unknown branch' : `branch ${branch}`}`,
+      reason,
+      details: {
+        tool: toolName,
+        allowedBranches,
+        ...(branch !== undefined ? { branch } : {}),
+      },
+    },
+  });
+
+  if (currentBranch === undefined) {
+    return blocked('Current branch could not be determined');
+  }
+  if (currentBranch.kind === 'detached') {
+    return blocked('Repository is in detached HEAD state, so no branch is in agent scope');
+  }
+  if (!branchIsInScope(currentBranch.name, identity.scope.branches)) {
+    return blocked('Current branch not in agent scope', currentBranch.name);
+  }
+  return ALLOW;
+}
+
+/**
+ * True when `branch` matches at least one branch-scope glob. Branch names are
+ * slash-separated like paths, so the same glob grammar applies: `59/*` matches
+ * `59/storage-bridge`, and `main` matches only `main`.
+ */
+export function branchIsInScope(branch: string, globs: readonly string[]): boolean {
+  return globs.some((glob) => matchesGlob(branch, glob));
 }
 
 /**
@@ -506,6 +593,12 @@ export interface ScopeEnforcementConfig {
    * ../sandbox/bash-sandbox.ts). Bash is denied unless this is `true`.
    */
   readonly isBashSandboxed?: boolean;
+  /**
+   * Reads what is checked out in the repository governing a directory, for the
+   * branch-scope check. Defaults to reading the repository's files on disk;
+   * injected for deterministic tests.
+   */
+  readonly readCurrentBranch?: (directory: string) => BranchState;
   /** Clock for the expiry check and event timestamps. Defaults to the system clock. */
   readonly now?: () => Date;
   /** Audit event id generator. Defaults to a random UUID. */
@@ -534,6 +627,9 @@ export function createScopeEnforcementHook(
 ): PreToolUseHookCallback {
   const now = config.now ?? (() => new Date());
   const generateEventId = config.generateEventId ?? (() => randomUUID());
+  const readCurrentBranch =
+    config.readCurrentBranch ??
+    ((directory: string) => readBranchState(directory, readTextFileOrUndefined));
 
   return async function enforceScope(input: HookInput): Promise<HookJSONOutput> {
     if (input.hook_event_name !== 'PreToolUse') {
@@ -548,6 +644,8 @@ export function createScopeEnforcementHook(
       toolInput: preToolUse.tool_input,
       now: now(),
       cwd: preToolUse.cwd,
+      // Read at every call, not once: the human may switch branches mid-run.
+      currentBranch: readCurrentBranch(preToolUse.cwd),
       ...(config.isBashSandboxed !== undefined
         ? { isBashSandboxed: config.isBashSandboxed }
         : {}),

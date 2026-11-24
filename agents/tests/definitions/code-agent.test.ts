@@ -35,7 +35,9 @@ import {
   buildCodeAgentQueryOptions,
   buildCodeAgentSystemPrompt,
   createCodeAgentIdentity,
+  defaultCodeAgentBranches,
   CODE_AGENT_DEFAULT_MODEL,
+  ANY_FEATURE_BRANCH,
   CODE_AGENT_FILE_SCOPE,
   CODE_AGENT_MCP_TOOLS,
   CODE_AGENT_READ_DENY_RULES,
@@ -53,6 +55,7 @@ import {
 import type { ReferenceResolver, ResolvedReference } from '../../src/mcp/reference-resolver.js';
 import { REFERENCE_RESOLVER_MCP_SERVER_NAME } from '../../src/mcp/reference-resolver.js';
 import type { BashSandboxEnvironment } from '../../src/sandbox/bash-sandbox.js';
+import { fakeFilesystem, gitRepositoryFiles } from '../support/fake-filesystem.js';
 import { InMemoryMemoryStore } from '../support/in-memory-memory-store.js';
 import { JsonlAuditLogger, readAuditEvents } from '../support/jsonl-audit-logger.js';
 
@@ -63,14 +66,28 @@ const PROJECT_ROOT = '/workspace/saor';
  * A fabricated host, so the wiring does not depend on the machine running the
  * tests: a macOS box (which has an OS sandbox) and a small project tree.
  */
-const SANDBOXED_HOST: BashSandboxEnvironment = {
-  platform: 'darwin',
-  hasCommand: () => false,
-  homeDir: '/Users/dev',
-  listDirectory: (absolutePath) =>
-    absolutePath === PROJECT_ROOT ? ['.sdlc', 'CLAUDE.md', 'docs', 'src'] : [],
-  realPath: (absolutePath) => absolutePath,
-};
+/** The agent under test works on issue 11, so its branch scope is `11/*`. */
+const FEATURE_BRANCH = '11/code-agent';
+
+/** A project tree with `branch` checked out, alongside `main` and a packed branch. */
+function hostOn(branch: string): BashSandboxEnvironment {
+  const files = fakeFilesystem({
+    ...gitRepositoryFiles(PROJECT_ROOT, branch, { loose: ['main'], packed: ['release/1.0'] }),
+    [`${PROJECT_ROOT}/.sdlc/memory.db`]: '',
+    [`${PROJECT_ROOT}/CLAUDE.md`]: '',
+    [`${PROJECT_ROOT}/docs/adr/001.md`]: '',
+    [`${PROJECT_ROOT}/src/app.ts`]: '',
+  });
+  return {
+    platform: 'darwin',
+    hasCommand: () => false,
+    homeDir: '/Users/dev',
+    realPath: (absolutePath) => absolutePath,
+    ...files,
+  };
+}
+
+const SANDBOXED_HOST: BashSandboxEnvironment = hostOn(FEATURE_BRANCH);
 
 /** A host with no OS sandbox the SDK can use. */
 const UNSANDBOXED_HOST: BashSandboxEnvironment = { ...SANDBOXED_HOST, platform: 'win32' };
@@ -134,6 +151,32 @@ describe('createCodeAgentIdentity', () => {
   });
 });
 
+describe('Code Agent branch scope (#58)', () => {
+  it('defaults to the feature branches of the issue, never main', () => {
+    expect(makeIdentity().scope.branches).toEqual(['11/*']);
+    expect(defaultCodeAgentBranches('58')).toEqual(['58/*']);
+    expect(defaultCodeAgentBranches(undefined)).toEqual([ANY_FEATURE_BRANCH]);
+    expect(defaultCodeAgentBranches('')).toEqual([ANY_FEATURE_BRANCH]);
+  });
+
+  it('honors an explicit branch scope', () => {
+    const identity = createCodeAgentIdentity({
+      delegatedBy: 'human:kevin',
+      purpose: 'test',
+      issue: '11',
+      branches: ['release/*'],
+      now: NOW,
+    });
+    expect(identity.scope.branches).toEqual(['release/*']);
+  });
+
+  it('tells the agent which branches it may work on and that it may commit', () => {
+    const prompt = buildCodeAgentSystemPrompt(makeIdentity());
+    expect(prompt).toContain('11/*');
+    expect(prompt).toContain('You may commit to the branch that is checked out');
+  });
+});
+
 describe('buildCodeAgentQueryOptions wiring', () => {
   function makeOptions(overrides: Partial<CodeAgentRuntimeConfig> = {}) {
     return buildCodeAgentQueryOptions({
@@ -168,12 +211,34 @@ describe('buildCodeAgentQueryOptions wiring', () => {
     expect(options.sandbox?.allowUnsandboxedCommands).toBe(false);
     const denyWrite = options.sandbox?.filesystem?.denyWrite ?? [];
     // Out-of-scope entries of the fabricated tree are denied; `src` is not.
-    expect(denyWrite).toEqual([
-      `/${PROJECT_ROOT}/.sdlc`,
-      `/${PROJECT_ROOT}/CLAUDE.md`,
-      `/${PROJECT_ROOT}/docs`,
-    ]);
+    expect(denyWrite).toEqual(
+      expect.arrayContaining([
+        `/${PROJECT_ROOT}/.sdlc`,
+        `/${PROJECT_ROOT}/CLAUDE.md`,
+        `/${PROJECT_ROOT}/docs`,
+      ]),
+    );
+    expect(denyWrite).not.toContain(`/${PROJECT_ROOT}/src`);
     expect(options.sandbox?.filesystem?.denyRead).toContain('//Users/dev/.ssh');
+  });
+
+  it('lets Bash commit on an in-scope branch without letting it leave that branch (#58)', () => {
+    const denyWrite = makeOptions().sandbox?.filesystem?.denyWrite ?? [];
+
+    // `.git` as a whole is open, so objects, the index, and the branch ref are writable…
+    expect(denyWrite).not.toContain(`/${PROJECT_ROOT}/.git`);
+    expect(denyWrite).not.toContain(`/${PROJECT_ROOT}/.git/refs/heads/${FEATURE_BRANCH}`);
+    // …but not the files that switch branches or move another one.
+    for (const denied of ['HEAD', 'config', 'hooks', 'refs/heads/main', 'refs/heads/release/1.0']) {
+      expect(denyWrite, denied).toContain(`/${PROJECT_ROOT}/.git/${denied}`);
+    }
+  });
+
+  it('keeps .git unwritable when the checked-out branch is out of scope (#58)', () => {
+    const denyWrite =
+      makeOptions({ bashSandboxEnvironment: hostOn('main') }).sandbox?.filesystem?.denyWrite ?? [];
+
+    expect(denyWrite).toContain(`/${PROJECT_ROOT}/.git`);
   });
 
   it('withholds Bash entirely when the host has no OS sandbox', () => {
@@ -295,6 +360,54 @@ describe('Code Agent integration against real stores', () => {
     return (output as { hookSpecificOutput?: { permissionDecision?: string } })
       .hookSpecificOutput?.permissionDecision;
   }
+
+  it('denies writes while an out-of-scope branch is checked out and audits them (#58)', async () => {
+    const options = buildCodeAgentQueryOptions({ ...config, bashSandboxEnvironment: hostOn('main') });
+    const preHooks = options.hooks!.PreToolUse![0]!.hooks;
+
+    const write = await firePreToolUse(
+      preHooks,
+      'Write',
+      { file_path: `${PROJECT_ROOT}/src/in-scope.ts`, content: 'x' },
+      'tu-write-main',
+    );
+    const bash = await firePreToolUse(preHooks, 'Bash', { command: 'git commit -am x' }, 'tu-bash-main');
+    // Reading is not a write: it stays allowed on any branch.
+    const read = await firePreToolUse(
+      preHooks,
+      'Read',
+      { file_path: `${PROJECT_ROOT}/src/app.ts` },
+      'tu-read-main',
+    );
+
+    expect(permissionDecision(write[0]!)).toBe('deny');
+    expect(permissionDecision(bash[0]!)).toBe('deny');
+    expect(permissionDecision(read[0]!)).toBe('allow');
+
+    const violations = readAuditEvents(auditPath).filter(
+      (event) => event.eventType === 'scope.violation',
+    );
+    expect(violations).toHaveLength(2);
+    for (const violation of violations) {
+      expect(violation.reason).toBe('Current branch not in agent scope');
+      expect(violation.details).toMatchObject({ branch: 'main', allowedBranches: ['11/*'] });
+    }
+  });
+
+  it('allows the same write once the issue branch is checked out (#58)', async () => {
+    // Negative control for the test above: same call, in-scope branch.
+    const options = buildCodeAgentQueryOptions(config);
+
+    const write = await firePreToolUse(
+      options.hooks!.PreToolUse![0]!.hooks,
+      'Write',
+      { file_path: `${PROJECT_ROOT}/src/in-scope.ts`, content: 'x' },
+      'tu-write-feature',
+    );
+
+    expect(permissionDecision(write[0]!)).toBe('allow');
+    expect(readAuditEvents(auditPath).some((e) => e.eventType === 'scope.violation')).toBe(false);
+  });
 
   it('denies a read outside the project and records a scope.violation (#56)', async () => {
     const options = buildCodeAgentQueryOptions(config);

@@ -2,7 +2,9 @@
  * agents/src/verify-bash-sandbox.ts
  *
  * Live check that the operating system really confines the Code Agent's Bash
- * tool the way ../sandbox/bash-sandbox.ts configures it (issue #56, ADR-010).
+ * tool the way ../sandbox/bash-sandbox.ts configures it (issue #56, ADR-010),
+ * including the git rules that allow commits on the scoped branch only (issue
+ * #58, ADR-011).
  *
  * The unit suite proves Saor builds the right sandbox settings. It cannot prove
  * the SDK and the OS then enforce them — that needs a real agent session. This
@@ -22,6 +24,7 @@
  * run; see the "Known limits" section of bash-sandbox.ts.
  */
 
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +36,8 @@ import type { ReferenceResolver } from './mcp/reference-resolver.js';
 
 const OUTSIDE_PROBE = join(homedir(), `saor-sandbox-probe-${process.pid}.txt`);
 const ORIGINAL_DOC = 'original\n';
+/** The check's agent works on issue 56, so its branch scope is `56/*`. */
+const FEATURE_BRANCH = '56/sandbox-check';
 
 /** A memory store that holds nothing; the check does not use memory. */
 const emptyMemoryStore: MemoryStore = {
@@ -52,7 +57,21 @@ function createProject(): string {
   mkdirSync(join(root, '.sdlc'));
   writeFileSync(join(root, 'docs', 'existing.md'), ORIGINAL_DOC);
   writeFileSync(join(root, '.sdlc', 'secret.txt'), 'audit-trail-contents\n');
+
+  // A real repository with the agent's feature branch checked out. Identity is
+  // set in the repository's own config, which the sandbox will not let the
+  // agent change.
+  git(root, 'init', '-q', '-b', 'main');
+  git(root, 'config', 'user.name', 'Sandbox Check');
+  git(root, 'config', 'user.email', 'sandbox-check@example.invalid');
+  git(root, 'add', 'docs');
+  git(root, 'commit', '-q', '-m', 'initial');
+  git(root, 'checkout', '-q', '-b', FEATURE_BRANCH);
   return root;
+}
+
+function git(root: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
 
 /** One shell command the agent is asked to run, and what the sandbox should do. */
@@ -71,6 +90,11 @@ function probeCommands(): ProbeCommand[] {
     { command: `echo outside > ${OUTSIDE_PROBE}`, blocked: true },
     { command: 'cat .sdlc/secret.txt > src/leak.txt', blocked: true },
     { command: 'echo new > NEW_TOP_LEVEL.md', blocked: false },
+    {
+      command: 'git add src/in-scope.txt && git commit -m "commit from the sandbox"',
+      blocked: false,
+    },
+    { command: 'git checkout main', blocked: true },
   ];
 }
 
@@ -94,6 +118,16 @@ interface Check {
 
 function fileContains(path: string, text: string): boolean {
   return existsSync(path) && readFileSync(path, 'utf8').includes(text);
+}
+
+/** Whether the file as committed on the feature branch contains `text`. */
+function committedFileContains(root: string, relativePath: string, text: string): boolean {
+  try {
+    return git(root, 'show', `${FEATURE_BRANCH}:${relativePath}`).includes(text);
+  } catch {
+    // Not committed on the branch at all.
+    return false;
+  }
 }
 
 /** The command each Bash tool call ran, keyed by its tool-use id. */
@@ -145,11 +179,31 @@ function auditChecks(events: readonly AuditEvent[]): Check[] {
   ];
 }
 
-function inspect(root: string, events: readonly AuditEvent[]): Check[] {
+function inspect(root: string, events: readonly AuditEvent[], mainBefore: string): Check[] {
   return [
     {
-      name: 'in-scope write succeeded (src/in-scope.txt)',
-      passed: fileContains(join(root, 'src', 'in-scope.txt'), 'in-scope'),
+      name: 'commit on the scoped branch succeeded',
+      passed: git(root, 'log', '-1', '--format=%s') === 'commit from the sandbox',
+    },
+    {
+      name: `branch could not be switched (still on ${FEATURE_BRANCH})`,
+      passed: git(root, 'rev-parse', '--abbrev-ref', 'HEAD') === FEATURE_BRANCH,
+    },
+    {
+      name: 'main was not moved',
+      passed: git(root, 'rev-parse', 'main') === mainBefore,
+    },
+    {
+      // Judged by what was committed, not by what is on disk afterwards: the
+      // refused `git checkout main` that follows rewrites the working tree
+      // before it fails (see the next check).
+      name: 'in-scope write succeeded and was committed (src/in-scope.txt)',
+      passed: committedFileContains(root, 'src/in-scope.txt', 'in-scope'),
+    },
+    {
+      name: 'KNOWN LIMIT — the refused branch switch left the working tree changed (src/in-scope.txt removed)',
+      passed: existsSync(join(root, 'src', 'in-scope.txt')),
+      informational: true,
     },
     {
       name: 'existing out-of-scope file was not modified (docs/existing.md)',
@@ -210,6 +264,8 @@ async function main(): Promise<number> {
     },
   };
 
+  const mainBefore = git(root, 'rev-parse', 'main');
+
   console.log(`Project: ${root}`);
   try {
     const run = runCodeAgent(prompt(root), {
@@ -239,7 +295,7 @@ async function main(): Promise<number> {
 
     reportAuditTrail(events);
 
-    const checks = inspect(root, events);
+    const checks = inspect(root, events, mainBefore);
     for (const check of checks) {
       const label = check.passed ? 'PASS' : check.informational ? 'NOTE' : 'FAIL';
       console.log(`  [${label}] ${check.name}`);
