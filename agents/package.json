@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:acceptance": "vitest run --project acceptance",
     "test:watch": "vitest"
   },
   "dependencies": {

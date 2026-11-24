@@ -22,9 +22,13 @@ All commands run from this directory (`agents/`).
 ```bash
 npm install           # install dependencies
 npm run build         # compile TypeScript (tsc)
-npm test              # run tests (vitest)
+npm test              # run all tests (vitest): unit suite and acceptance tier
+npm run test:unit     # unit suite only
+npm run test:acceptance   # acceptance tier only
 npm run test:watch    # run tests in watch mode
 ```
+
+The acceptance tier (`tests/acceptance/`) holds one file per GitHub issue — the executable definition of done for that issue, run against real files with no mocks. See [tests/acceptance/README.md](tests/acceptance/README.md).
 
 ### Live sandbox check
 
