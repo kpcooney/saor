@@ -52,6 +52,9 @@ cargo fmt --check     # format check
 cd agents
 npm test              # vitest
 
+# Acceptance tier only, both languages (from root)
+npm run test:acceptance
+
 # Frontend type checking (from root)
 npm run check
 ```
