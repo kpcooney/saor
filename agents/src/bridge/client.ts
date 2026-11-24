@@ -6,9 +6,10 @@
  * stdout (requests and status lines out) and stdin (responses in); tests pass
  * in-memory streams.
  *
- * Each request is one JSON line carrying a numeric id. Responses are matched
- * to their request by that id, so several requests can be in flight at once —
- * the audit hooks and a memory tool may well overlap.
+ * Each request is one JSON line carrying a numeric id. A line ends at `\n`
+ * and nothing else — see line-reader.ts for why that matters. Responses are
+ * matched to their request by that id, so several requests can be in flight at
+ * once — the audit hooks and a memory tool may well overlap.
  *
  * Failure handling, in order of how it can go wrong:
  *
@@ -22,9 +23,9 @@
  *     the client.
  */
 
-import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
+import { readLines } from './line-reader.js';
 import {
   BridgeRequestError,
   isBridgeResponse,
@@ -88,8 +89,6 @@ export function createBridgeClient(
   let nextId = 1;
   let isClosed = false;
 
-  const lines = createInterface({ input: streams.input, crlfDelay: Infinity });
-
   function writeLine(message: BridgeRequest | SidecarStatusLine): void {
     streams.output.write(`${JSON.stringify(message)}\n`);
   }
@@ -144,12 +143,14 @@ export function createBridgeClient(
     takePending(parsed.id)?.reject(error);
   }
 
-  lines.on('line', handleLine);
-  // 'close' fires when the input ends on its own (the parent went away) as well
-  // as after our own close(); either way nothing more will be answered.
-  lines.on('close', () => {
-    isClosed = true;
-    failAllPending('the storage bridge closed before a response arrived');
+  const lines = readLines(streams.input, {
+    onLine: handleLine,
+    // Called when the input ends on its own (the parent went away) as well as
+    // after our own close(); either way nothing more will be answered.
+    onClose: () => {
+      isClosed = true;
+      failAllPending('the storage bridge closed before a response arrived');
+    },
   });
 
   return {
@@ -175,10 +176,9 @@ export function createBridgeClient(
       if (isClosed) {
         return;
       }
+      // Also pauses the input, so an open stdin pipe does not keep the
+      // process alive.
       lines.close();
-      // readline stops listening but leaves the stream flowing-capable; pause
-      // it so an open stdin pipe does not keep the process alive.
-      streams.input.pause();
     },
   };
 }

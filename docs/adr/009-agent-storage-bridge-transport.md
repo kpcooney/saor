@@ -29,6 +29,8 @@ The forces:
 
 ### Wire format
 
+A protocol line ends at a line feed (`\n`, 0x0A) and at nothing else. JSON always escapes a line feed inside a string, so one cannot occur within a message. Both ends must split on exactly that byte: other characters that some line readers treat as terminators — notably U+2028 and U+2029, which JSON leaves unescaped — are ordinary payload. (The Node end originally used `node:readline`, which splits on those two characters as well; a response containing one never reached its request. See issue #68.)
+
 Every protocol line is a single JSON object with a `kind` discriminator:
 
 | Direction | `kind` | Shape |
