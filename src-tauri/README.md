@@ -8,9 +8,10 @@ This is the Rust backend, following Tauri's standard convention where the native
 - **Reference resolver** (`references/`) — resolves URI schemes (`file://`, `standards://`, `memory://`, `audit://`) used in agent reference manifests
 - **Agent identity and scope validation** (`identity/`) — validates `AgentIdentity` structs and enforces file glob and tool allowlist restrictions
 - **Agent process lifecycle** (`process/`) — spawns, monitors, and terminates the TypeScript agent sidecar processes, and attaches the storage bridge to each one
-- **Storage bridge** (`bridge/`) — serves a running agent's memory, audit, and reference-resolution requests over the agent process's stdio, since a Node subprocess cannot call `invoke`; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
+- **Session transcripts** (`transcript/`) — the per-session record of what an agent was asked, what it said, and how the run ended, as one JSONL file per session under `.sdlc/sessions/`; see [ADR-013](../docs/adr/013-session-transcript-store.md)
+- **Storage bridge** (`bridge/`) — serves a running agent's memory, audit, reference-resolution, and transcript requests over the agent process's stdio, since a Node subprocess cannot call `invoke`; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
 - **Project registry** (`project/`) — app-level SQLite index of known projects (the "known projects" list the UI opens), stored in the Tauri app-data directory; see [ADR-008](../docs/adr/008-project-registry.md)
-- **IPC command handlers** (`commands/`, registered in `src/lib.rs`) — thin Tauri `#[tauri::command]` functions that bridge frontend `invoke()` calls to the modules above (project, memory, audit, and agent-session commands)
+- **IPC command handlers** (`commands/`, registered in `src/lib.rs`) — thin Tauri `#[tauri::command]` functions that bridge frontend `invoke()` calls to the modules above (project, memory, audit, agent-session, and session-transcript commands)
 
 **What it is NOT responsible for:** Agent business logic, agent orchestration, and MCP server definitions. Those live in the `agents/` TypeScript package. The Rust layer is deliberately thin — stable infrastructure that doesn't change often, so that iteration happens in the agent layer where the interesting work is.
 

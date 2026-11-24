@@ -12,8 +12,9 @@ This package contains:
 
 - **`src/sandbox/`** — OS-sandbox configuration for the `Bash` tool: confines an agent's shell commands to its file scope and away from protected paths. The scope hook cannot path-check a shell command, so the operating system does; see [ADR-010](../docs/adr/010-bash-and-read-confinement.md)
 - **`src/git/`** — Reads a repository's checked-out branch and branch list from its files, for branch-scope enforcement: the scope hook blocks writes on an out-of-scope branch, and the sandbox lets Bash commit to the scoped branch without being able to switch or alter another; see [ADR-011](../docs/adr/011-branch-scope-enforcement.md)
-- **`src/bridge/`** — The storage bridge: a client that exchanges line-delimited JSON with the Rust backend over this process's stdio, and the adapters that implement the memory, audit, and reference ports on top of it. This is how a launched agent reaches the Rust-owned stores; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
-- **`src/sidecar.ts`** / **`src/sidecar-runner.ts`** — The process entrypoint Rust launches (`node dist/sidecar.js …`) and the run logic behind it: build the Code Agent over the bridge, run it on the launch task, report the outcome
+- **`src/bridge/`** — The storage bridge: a client that exchanges line-delimited JSON with the Rust backend over this process's stdio, and the adapters that implement the memory, audit, reference, and transcript ports on top of it. This is how a launched agent reaches the Rust-owned stores; see [ADR-009](../docs/adr/009-agent-storage-bridge-transport.md)
+- **`src/transcript/`** — Turns the SDK's message stream into session-transcript entries: the task, what the agent said each turn (with the ids of the tool calls it made), and the outcome. The sidecar sends them to the Rust transcript store so the UI can show a run; see [ADR-013](../docs/adr/013-session-transcript-store.md)
+- **`src/sidecar.ts`** / **`src/sidecar-runner.ts`** — The process entrypoint Rust launches (`node dist/sidecar.js …`) and the run logic behind it: build the Code Agent over the bridge, run it on the launch task, record its transcript, report the outcome
 
 ## Build & Test
 

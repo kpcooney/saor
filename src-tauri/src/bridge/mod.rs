@@ -2,8 +2,8 @@
 //
 // The Node↔Rust storage bridge (issue #59, ADR-009). A launched agent sidecar
 // is a Node subprocess and cannot call Tauri `invoke`, so it reaches the
-// Rust-owned memory store, audit store, and reference resolver through this
-// bridge instead: line-delimited JSON over the sidecar's own stdio.
+// Rust-owned memory store, audit store, reference resolver, and session
+// transcript through this bridge instead: line-delimited JSON over the sidecar's own stdio.
 //
 //   sidecar stdout ──▶ one JSON request per line  ──▶ BridgeHost::handle_line
 //   sidecar stdin  ◀── one JSON response per line ◀──┘
