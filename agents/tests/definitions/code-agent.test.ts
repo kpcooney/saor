@@ -38,6 +38,7 @@ import {
   CODE_AGENT_DEFAULT_MODEL,
   CODE_AGENT_FILE_SCOPE,
   CODE_AGENT_MCP_TOOLS,
+  CODE_AGENT_READ_DENY_RULES,
   CODE_AGENT_STANDARDS,
   CODE_AGENT_TOOLS,
   type CodeAgentRuntimeConfig,
@@ -51,11 +52,28 @@ import {
 } from '../../src/mcp/memory-server.js';
 import type { ReferenceResolver, ResolvedReference } from '../../src/mcp/reference-resolver.js';
 import { REFERENCE_RESOLVER_MCP_SERVER_NAME } from '../../src/mcp/reference-resolver.js';
+import type { BashSandboxEnvironment } from '../../src/sandbox/bash-sandbox.js';
 import { InMemoryMemoryStore } from '../support/in-memory-memory-store.js';
 import { JsonlAuditLogger, readAuditEvents } from '../support/jsonl-audit-logger.js';
 
 const NOW = new Date('2026-07-01T12:00:00.000Z');
 const PROJECT_ROOT = '/workspace/saor';
+
+/**
+ * A fabricated host, so the wiring does not depend on the machine running the
+ * tests: a macOS box (which has an OS sandbox) and a small project tree.
+ */
+const SANDBOXED_HOST: BashSandboxEnvironment = {
+  platform: 'darwin',
+  hasCommand: () => false,
+  homeDir: '/Users/dev',
+  listDirectory: (absolutePath) =>
+    absolutePath === PROJECT_ROOT ? ['.sdlc', 'CLAUDE.md', 'docs', 'src'] : [],
+  realPath: (absolutePath) => absolutePath,
+};
+
+/** A host with no OS sandbox the SDK can use. */
+const UNSANDBOXED_HOST: BashSandboxEnvironment = { ...SANDBOXED_HOST, platform: 'win32' };
 
 function makeIdentity() {
   return createCodeAgentIdentity({
@@ -125,6 +143,7 @@ describe('buildCodeAgentQueryOptions wiring', () => {
       memoryStore: new InMemoryMemoryStore(),
       referenceResolver: stubResolver,
       auditLogger: { async log() {} },
+      bashSandboxEnvironment: SANDBOXED_HOST,
       ...overrides,
     });
   }
@@ -135,10 +154,44 @@ describe('buildCodeAgentQueryOptions wiring', () => {
     expect(options.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(2);
   });
 
-  it('registers the completed-audit hook on PostToolUse and PostToolUseFailure', () => {
+  it('registers the completed-audit and sandbox-violation hooks on both post-tool events', () => {
     const options = makeOptions();
-    expect(options.hooks?.PostToolUse?.[0]?.hooks).toHaveLength(1);
-    expect(options.hooks?.PostToolUseFailure?.[0]?.hooks).toHaveLength(1);
+    expect(options.hooks?.PostToolUse?.[0]?.hooks).toHaveLength(2);
+    expect(options.hooks?.PostToolUseFailure?.[0]?.hooks).toHaveLength(2);
+  });
+
+  it('sandboxes Bash to the file scope when the host has an OS sandbox', () => {
+    const options = makeOptions();
+
+    expect(options.allowedTools).toContain('Bash');
+    expect(options.sandbox?.enabled).toBe(true);
+    expect(options.sandbox?.allowUnsandboxedCommands).toBe(false);
+    const denyWrite = options.sandbox?.filesystem?.denyWrite ?? [];
+    // Out-of-scope entries of the fabricated tree are denied; `src` is not.
+    expect(denyWrite).toEqual([
+      `/${PROJECT_ROOT}/.sdlc`,
+      `/${PROJECT_ROOT}/CLAUDE.md`,
+      `/${PROJECT_ROOT}/docs`,
+    ]);
+    expect(options.sandbox?.filesystem?.denyRead).toContain('//Users/dev/.ssh');
+  });
+
+  it('withholds Bash entirely when the host has no OS sandbox', () => {
+    const options = makeOptions({ bashSandboxEnvironment: UNSANDBOXED_HOST });
+
+    expect(options.sandbox).toBeUndefined();
+    expect(options.allowedTools).not.toContain('Bash');
+    expect(options.allowedTools).toContain('Read');
+    expect(options.disallowedTools).toContain('Bash');
+  });
+
+  it('registers Read deny rules for the protected paths either way', () => {
+    for (const host of [SANDBOXED_HOST, UNSANDBOXED_HOST]) {
+      const options = makeOptions({ bashSandboxEnvironment: host });
+      expect(options.disallowedTools).toEqual(expect.arrayContaining([...CODE_AGENT_READ_DENY_RULES]));
+    }
+    expect(CODE_AGENT_READ_DENY_RULES).toContain('Read(./.env)');
+    expect(CODE_AGENT_READ_DENY_RULES).toContain('Read(./.sdlc/**)');
   });
 
   it('registers both MCP servers under their server-name keys', () => {
@@ -184,6 +237,7 @@ describe('Code Agent integration against real stores', () => {
       memoryStore,
       referenceResolver: stubResolver,
       auditLogger: new JsonlAuditLogger(auditPath),
+      bashSandboxEnvironment: SANDBOXED_HOST,
       now: () => NOW,
     };
   });
@@ -241,6 +295,91 @@ describe('Code Agent integration against real stores', () => {
     return (output as { hookSpecificOutput?: { permissionDecision?: string } })
       .hookSpecificOutput?.permissionDecision;
   }
+
+  it('denies a read outside the project and records a scope.violation (#56)', async () => {
+    const options = buildCodeAgentQueryOptions(config);
+    const preHooks = options.hooks!.PreToolUse![0]!.hooks;
+
+    const outside = await firePreToolUse(
+      preHooks,
+      'Read',
+      { file_path: '/Users/dev/.ssh/id_rsa' },
+      'tu-read-outside',
+    );
+    const protectedPath = await firePreToolUse(
+      preHooks,
+      'Grep',
+      { pattern: 'token', path: `${PROJECT_ROOT}/.sdlc` },
+      'tu-read-protected',
+    );
+    // Negative control: an ordinary project read goes through.
+    const inside = await firePreToolUse(
+      preHooks,
+      'Read',
+      { file_path: `${PROJECT_ROOT}/docs/adr/001.md` },
+      'tu-read-inside',
+    );
+
+    expect(permissionDecision(outside[0]!)).toBe('deny');
+    expect(permissionDecision(protectedPath[0]!)).toBe('deny');
+    expect(permissionDecision(inside[0]!)).toBe('allow');
+
+    const violations = readAuditEvents(auditPath).filter(
+      (event) => event.eventType === 'scope.violation',
+    );
+    expect(violations.map((event) => event.details['filePath'])).toEqual([
+      '/Users/dev/.ssh/id_rsa',
+      `${PROJECT_ROOT}/.sdlc`,
+    ]);
+  });
+
+  it('lets sandboxed Bash run and audits what the sandbox blocked (#56)', async () => {
+    const options = buildCodeAgentQueryOptions(config);
+    const command = { command: 'echo x > docs/notes.md' };
+
+    const pre = await firePreToolUse(options.hooks!.PreToolUse![0]!.hooks, 'Bash', command, 'tu-bash');
+    // The hook lets the command run; confining it is the sandbox's job.
+    expect(permissionDecision(pre[0]!)).toBe('allow');
+
+    await firePostToolUse(
+      options.hooks!.PostToolUse![0]!.hooks,
+      'Bash',
+      command,
+      {
+        stdout: '',
+        stderr:
+          'Operation not permitted\n<sandbox_violations>\ndeny file-write-create docs/notes.md\n</sandbox_violations>',
+      },
+      'tu-bash',
+    );
+
+    const events = readAuditEvents(auditPath).filter((event) => event.details['toolUseId'] === 'tu-bash');
+    expect(events.map((event) => event.eventType)).toEqual([
+      'tool.invoked',
+      'tool.completed',
+      'scope.violation',
+    ]);
+    expect(events[2]).toMatchObject({ result: 'blocked', details: { command: command.command } });
+  });
+
+  it('denies Bash and records tool.blocked when the host has no OS sandbox (#56)', async () => {
+    const options = buildCodeAgentQueryOptions({
+      ...config,
+      bashSandboxEnvironment: UNSANDBOXED_HOST,
+    });
+
+    const pre = await firePreToolUse(
+      options.hooks!.PreToolUse![0]!.hooks,
+      'Bash',
+      { command: 'echo x > docs/notes.md' },
+      'tu-bash',
+    );
+
+    expect(permissionDecision(pre[0]!)).toBe('deny');
+    const blocked = readAuditEvents(auditPath).filter((event) => event.eventType === 'tool.blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!.reason).toContain('OS sandbox');
+  });
 
   it('denies an out-of-scope write to docs/ and records a blocked event', async () => {
     const options = buildCodeAgentQueryOptions(config);

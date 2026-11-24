@@ -23,9 +23,21 @@
  *     by the one-time human integration check, not the unit suite.
  *
  * The Code Agent's scope is restricted to the file globs and tools defined
- * here. Attempts to write outside the allowed globs or invoke disallowed
- * tools are blocked by the PreToolUse scope-enforcement hook and logged to the
- * audit trail.
+ * here. What enforces that, per tool (issue #56, ADR-010):
+ *
+ *   - `Write` / `Edit` outside the file globs, and any tool not on the
+ *     allowlist, are blocked by the PreToolUse scope-enforcement hook and
+ *     logged to the audit trail.
+ *   - `Read` / `Grep` / `Glob` are held to the project root and kept away from
+ *     protected paths by the same hook, backed by `Read(...)` deny rules for
+ *     searches that sweep a whole directory.
+ *   - `Bash` runs inside the OS sandbox built by ../sandbox/bash-sandbox.ts: it
+ *     cannot write outside the project, cannot modify existing files outside
+ *     the file scope (build output directories excepted), cannot read protected
+ *     paths, and has no network. That module's header lists the limits. Where
+ *     no OS sandbox is available, Bash is withheld entirely.
+ *
+ * `scope.branches` is declared on the identity but not enforced here.
  *
  * Two details of the scope deviate from the literal text of issue #11, because
  * the concrete memory store (#8) and scope hook (#7) that landed after the
@@ -57,6 +69,7 @@ import {
   createToolCompletedAuditHook,
   createToolInvokedAuditHook,
 } from '../hooks/audit-logger.js';
+import { createSandboxViolationAuditHook } from '../hooks/sandbox-violation-audit.js';
 import { createScopeEnforcementHook } from '../hooks/scope-enforcement.js';
 import {
   createMemoryMcpServer,
@@ -69,6 +82,14 @@ import {
   REFERENCE_RESOLVER_MCP_SERVER_NAME,
 } from '../mcp/reference-resolver.js';
 import type { ReferenceResolver } from '../mcp/reference-resolver.js';
+import {
+  BASH_BUILD_OUTPUT_DIRS,
+  buildBashSandboxSettings,
+  isBashSandboxAvailable,
+  type BashSandboxEnvironment,
+} from '../sandbox/bash-sandbox.js';
+import { PROTECTED_PROJECT_GLOBS } from '../sandbox/protected-paths.js';
+import { systemBashSandboxEnvironment } from '../sandbox/system-environment.js';
 
 /** The Code Agent's role, stamped onto its identity and audit events. */
 export const CODE_AGENT_ROLE = 'code-agent';
@@ -233,6 +254,7 @@ export function buildCodeAgentSystemPrompt(identity: AgentIdentity): string {
     'You are the Code Agent, a software implementation specialist in the Saor SDLC platform.',
     `Your purpose: ${identity.purpose}`,
     `You may create and edit files only within: ${files}. Attempts to write elsewhere are blocked and audited — do not try to work around this.`,
+    'Shell commands run in a sandbox: they cannot change files outside that boundary (build output aside), cannot read credentials or the .sdlc directory, and have no network access. A command that fails for one of these reasons is working as intended.',
     'Use the memory tools to record durable learnings and to read project conventions and context before you start.',
     `Resolve and follow the standards that apply to your work: ${standards}. Use resolve_ref to read them.`,
     'Every artifact you produce must carry its traceability references (issue, related ADRs/PRs).',
@@ -269,7 +291,25 @@ export interface CodeAgentRuntimeConfig {
   readonly generateEventId?: () => string;
   /** Memory tool id/clock injection, for deterministic tests. */
   readonly memoryDeps?: MemoryToolDeps;
+  /**
+   * The host facts sandboxing Bash depends on (platform, installed commands,
+   * home directory, directory listings). Defaults to the real machine;
+   * injected for deterministic tests.
+   */
+  readonly bashSandboxEnvironment?: BashSandboxEnvironment;
 }
+
+/** The shell tool's name, as it appears in tool allowlists. */
+const BASH_TOOL = 'Bash';
+
+/**
+ * `Read(...)` deny rules for the protected project paths. The scope hook checks
+ * the path a read names; these rules are what the SDK applies to a `Grep` or
+ * `Glob` that sweeps a directory containing a protected file.
+ */
+export const CODE_AGENT_READ_DENY_RULES: readonly string[] = PROTECTED_PROJECT_GLOBS.map(
+  (glob) => `Read(./${glob})`,
+);
 
 /** The Code Agent's default model. */
 export const CODE_AGENT_DEFAULT_MODEL = 'sonnet';
@@ -281,7 +321,14 @@ export const CODE_AGENT_DEFAULT_MODEL = 'sonnet';
  *     audits them) and the `tool.invoked` audit hook (records every attempt).
  *     Both fire on every tool call; a scope denial still records `tool.invoked`
  *     plus `tool.blocked`, and no `tool.completed` follows (see ADR-006).
- *   - PostToolUse / PostToolUseFailure: the `tool.completed` audit hook.
+ *   - PostToolUse / PostToolUseFailure: the `tool.completed` audit hook, and
+ *     the hook that records a `scope.violation` when the sandbox blocked part
+ *     of a Bash command.
+ *   - sandbox: the OS sandbox settings confining Bash to the agent's file scope
+ *     (see ../sandbox/bash-sandbox.ts). When the host has no OS sandbox, the
+ *     settings are omitted and Bash is withheld instead: dropped from
+ *     `allowedTools`, added to `disallowedTools`, and denied by the scope hook.
+ *   - disallowedTools: `Read(...)` deny rules for the protected paths.
  *   - mcpServers: the memory and reference-resolver in-process servers, keyed
  *     by their server names so the granted `mcp__…` tool names line up.
  *   - allowedTools: the same allowlist the scope hook enforces, so the SDK and
@@ -292,10 +339,14 @@ export const CODE_AGENT_DEFAULT_MODEL = 'sonnet';
 export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Options {
   const { identity, projectId, auditLogger } = config;
 
+  const environment = config.bashSandboxEnvironment ?? systemBashSandboxEnvironment();
+  const isBashSandboxed = isBashSandboxAvailable(environment);
+
   const hookConfig = {
     identity,
     auditLogger,
     projectId,
+    isBashSandboxed,
     ...(config.now !== undefined ? { now: config.now } : {}),
     ...(config.generateEventId !== undefined
       ? { generateEventId: config.generateEventId }
@@ -305,6 +356,7 @@ export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Opti
   const scopeHook = createScopeEnforcementHook(hookConfig);
   const toolInvokedHook = createToolInvokedAuditHook(hookConfig);
   const toolCompletedHook = createToolCompletedAuditHook(hookConfig);
+  const sandboxViolationHook = createSandboxViolationAuditHook(hookConfig);
 
   const memoryServer = createMemoryMcpServer({
     store: config.memoryStore,
@@ -319,7 +371,20 @@ export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Opti
     systemPrompt: buildCodeAgentSystemPrompt(identity),
     model: config.model ?? CODE_AGENT_DEFAULT_MODEL,
     cwd: config.cwd,
-    allowedTools: [...identity.scope.tools],
+    allowedTools: identity.scope.tools.filter((tool) => isBashSandboxed || tool !== BASH_TOOL),
+    disallowedTools: [...CODE_AGENT_READ_DENY_RULES, ...(isBashSandboxed ? [] : [BASH_TOOL])],
+    ...(isBashSandboxed
+      ? {
+          sandbox: buildBashSandboxSettings({
+            projectRoot: config.cwd,
+            realProjectRoot: environment.realPath(config.cwd),
+            writableGlobs: identity.scope.files,
+            buildOutputDirs: BASH_BUILD_OUTPUT_DIRS,
+            homeDir: environment.homeDir,
+            listDirectory: environment.listDirectory,
+          }),
+        }
+      : {}),
     mcpServers: {
       [MEMORY_MCP_SERVER_NAME]: memoryServer,
       [REFERENCE_RESOLVER_MCP_SERVER_NAME]: referenceServer,
@@ -329,8 +394,8 @@ export function buildCodeAgentQueryOptions(config: CodeAgentRuntimeConfig): Opti
       // decision is computed first, but both run — auditing never gates the
       // permission decision (CLAUDE.md principle 4).
       PreToolUse: [{ hooks: [scopeHook, toolInvokedHook] }],
-      PostToolUse: [{ hooks: [toolCompletedHook] }],
-      PostToolUseFailure: [{ hooks: [toolCompletedHook] }],
+      PostToolUse: [{ hooks: [toolCompletedHook, sandboxViolationHook] }],
+      PostToolUseFailure: [{ hooks: [toolCompletedHook, sandboxViolationHook] }],
     },
   };
 }
