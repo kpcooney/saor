@@ -1,4 +1,6 @@
 /**
+ * agents/tests/acceptance/issue-010-audit-hook.acceptance.test.ts
+ *
  * Acceptance: issue #10 — the tool audit hooks (PreToolUse `tool.invoked`,
  * PostToolUse / PostToolUseFailure `tool.completed`; see ADR-006).
  *
@@ -8,6 +10,8 @@
  * how the tool runs.
  *
  * Real store: a JSONL audit file in a temp project, read back from disk. The
+ * one test double in this file is a spy on `console.error`, used to observe
+ * that a failed audit write is reported on stderr; no store is mocked. The
  * negative controls are a hook event that is not a tool call (nothing may be
  * written) and an audit file that cannot be written (the hook must still
  * return normally), so a hook that logs indiscriminately, or one that gates
@@ -59,34 +63,37 @@ describe('#10 tool audit hooks', () => {
   });
 
   afterEach(() => {
-    project.remove();
+    project?.remove();
   });
 
-  function base(toolUseId: string) {
+  const TOOL_INPUT_CONTENT = 'export {};\n';
+
+  /** The fields every tool-call hook input shares, for one tool-use id. */
+  function toolCallFields(toolUseId: string) {
     return {
       session_id: SESSION,
       transcript_path: project.pathOf('transcript.jsonl'),
       cwd: project.root,
       tool_name: 'Write',
-      tool_input: { file_path: project.pathOf('src/a.ts'), content: 'export {};\n' },
+      tool_input: { file_path: project.pathOf('src/a.ts'), content: TOOL_INPUT_CONTENT },
       tool_use_id: toolUseId,
     };
   }
 
   function preToolUse(toolUseId: string): PreToolUseHookInput {
-    return { hook_event_name: 'PreToolUse', ...base(toolUseId) };
+    return { hook_event_name: 'PreToolUse', ...toolCallFields(toolUseId) };
   }
 
   function postToolUse(toolUseId: string): PostToolUseHookInput {
     return {
       hook_event_name: 'PostToolUse',
-      ...base(toolUseId),
+      ...toolCallFields(toolUseId),
       tool_response: { type: 'create' },
     };
   }
 
   function postToolUseFailure(toolUseId: string, error: string): PostToolUseFailureHookInput {
-    return { hook_event_name: 'PostToolUseFailure', ...base(toolUseId), error };
+    return { hook_event_name: 'PostToolUseFailure', ...toolCallFields(toolUseId), error };
   }
 
   it('records a correlated invoked/completed pair for a successful tool call', async () => {
@@ -121,7 +128,12 @@ describe('#10 tool audit hooks', () => {
         issueRef: '10',
         action: 'Write',
       });
-      expect(event.details.toolUseId).toBe('tu-1');
+      // What was done, to what: the tool and its parameters as invoked.
+      expect(event.details).toEqual({
+        tool: 'Write',
+        parameters: { file_path: project.pathOf('src/a.ts'), content: TOOL_INPUT_CONTENT },
+        toolUseId: 'tu-1',
+      });
     }
     expect(events[0]!.id).not.toBe(events[1]!.id);
 
@@ -166,6 +178,8 @@ describe('#10 tool audit hooks', () => {
   });
 
   it('writes nothing for a hook event that is not a tool call', async () => {
+    // Cast: the SDK's `HookInput` union needs event-specific fields this test
+    // has no use for; the hooks only read `hook_event_name` before returning.
     const notAToolCall = {
       hook_event_name: 'UserPromptSubmit',
       session_id: SESSION,

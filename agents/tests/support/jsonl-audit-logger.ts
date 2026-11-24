@@ -1,7 +1,8 @@
 /**
  * agents/tests/support/jsonl-audit-logger.ts
  *
- * A real, file-backed AuditLogger for the Code Agent integration test (#11).
+ * A real, file-backed AuditLogger, used by the Code Agent integration test
+ * (#11) and by the acceptance tier (tests/acceptance/) as its audit store.
  * It is not a mock: `log()` appends the event as a JSON line to a temp file,
  * and `readAuditEvents()` reads it back by parsing the file — so a test asserts
  * on side effects actually persisted to disk, per the acceptance-check
