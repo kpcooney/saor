@@ -93,7 +93,23 @@ async function probe() {
     resolver.resolve('file://docs/note.md'),
   ]);
 
+  // U+2028 and U+2029 are legal, unescaped characters in JSON. Responses that
+  // carry them must arrive whole (issue #68). This runs last so the entry does
+  // not disturb what the checks above observed.
+  const separatorText = 'separated\u2028by\u2029unicode';
+  await memory.write(entry('probe-separators', 'learning', separatorText));
+  const separatorSearch = await memory.keywordSearch('separated', { category: 'learning' });
+  const separatorContext = await memory.getProjectContext(projectId);
+  const separatorFile = await resolver.resolve('file://docs/separators.md');
+
   return {
+    separators: {
+      searchContent: separatorSearch[0]?.content,
+      contextContent: separatorContext.recentLearnings.find(
+        (learning) => learning.id === 'probe-separators',
+      )?.content,
+      fileContent: separatorFile.content,
+    },
     search,
     filteredOutCount: filteredOut.length,
     context,

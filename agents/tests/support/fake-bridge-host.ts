@@ -4,15 +4,16 @@
  * A stand-in for the Rust end of the storage bridge, for tests of the
  * TypeScript end. It owns the two in-memory streams a bridge client talks
  * over, records every line the client writes, and answers each request with
- * whatever the test's handler returns.
+ * whatever the test's handler returns. Like the Rust host, it ends a line at
+ * `\n` only.
  *
  * It is a scripted double, not a store: tests that need real store behavior
  * drive the real Rust host from src-tauri/tests/storage_bridge.rs instead.
  */
 
-import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 
+import { readLines } from '../../src/bridge/line-reader.js';
 import type { BridgeErrorCode, BridgeMethod } from '../../src/bridge/protocol.js';
 
 /** A request line as the fake host received it. */
@@ -58,7 +59,7 @@ export function createFakeBridgeHost(handler: FakeHandler = replyNull): FakeBrid
     input.write(`${line}\n`);
   }
 
-  createInterface({ input: output }).on('line', (line) => {
+  function handleLine(line: string): void {
     const message = JSON.parse(line) as Record<string, unknown>;
     if (message['kind'] === 'status') {
       statuses.push(message);
@@ -87,7 +88,9 @@ export function createFakeBridgeHost(handler: FakeHandler = replyNull): FakeBrid
         error: { code: reply.code, message: reply.message },
       }),
     );
-  });
+  }
+
+  readLines(output, { onLine: handleLine, onClose: () => undefined });
 
   return { input, output, requests, statuses, sendRaw, hangUp: () => input.end() };
 }

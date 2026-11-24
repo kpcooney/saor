@@ -101,6 +101,27 @@ describe('createBridgeClient', () => {
     expect(diagnostics.join('\n')).toContain('uncorrelated bridge error: no id');
   });
 
+  it('settles a request whose response contains U+2028 and U+2029', async () => {
+    // Issue #68: JSON leaves these two characters unescaped, and a reader that
+    // ends a line at them splits the response and strands the request.
+    const content = 'line one line two line three';
+    const { client, diagnostics } = connect(() => ({ ok: true, result: { content } }));
+
+    const result = await client.request(BRIDGE_METHODS.referenceResolve, { uri: 'file://a.md' });
+
+    expect(result).toEqual({ content });
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('sends a request containing U+2028 and U+2029 as a single line', async () => {
+    const query = 'before between after';
+    const { host, client } = connect();
+
+    await client.request(BRIDGE_METHODS.memorySearch, { query });
+
+    expect(host.requests).toEqual([{ id: 1, method: 'memory.search', params: { query } }]);
+  });
+
   it('fails in-flight requests when the response channel ends', async () => {
     const { host, client } = connect(() => undefined);
 

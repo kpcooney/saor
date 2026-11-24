@@ -35,6 +35,13 @@ use saor_lib::project::ProjectRegistry;
 
 const SESSION: &str = "session-bridge-probe";
 
+/// Memory content the probe writes and reads back: it contains U+2028 (LINE
+/// SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR), which JSON does not escape.
+const SEPARATOR_MEMORY: &str = "separated\u{2028}by\u{2029}unicode";
+
+/// A project file with the same two characters, resolved through the bridge.
+const SEPARATOR_FILE: &str = "a note\u{2028}with\u{2029}separators";
+
 fn agents_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -47,7 +54,7 @@ fn agents_dir() -> PathBuf {
 /// make the test pass or fail for reasons unrelated to the code under review.
 fn require_current_agents_build() {
     let agents = agents_dir();
-    for module in ["protocol", "client", "adapters"] {
+    for module in ["protocol", "client", "line-reader", "adapters"] {
         let source = agents
             .join("src")
             .join("bridge")
@@ -136,6 +143,11 @@ fn node_adapters_round_trip_through_the_real_rust_stores() {
     let project = registry.create("Bridge probe", &project_path, "").unwrap();
     std::fs::create_dir_all(project_path.join("docs")).unwrap();
     std::fs::write(project_path.join("docs").join("note.md"), "a project note").unwrap();
+    std::fs::write(
+        project_path.join("docs").join("separators.md"),
+        SEPARATOR_FILE,
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("outside.txt"), "outside the project").unwrap();
     let standards_root = tmp.path().join("standards");
     std::fs::create_dir_all(standards_root.join("coding-standards")).unwrap();
@@ -185,6 +197,13 @@ fn node_adapters_round_trip_through_the_real_rust_stores() {
         serde_json::json!(["probe-learning", "probe-convention", "content"])
     );
 
+    // U+2028 and U+2029 are unescaped in JSON, so they cross the bridge raw.
+    // Each response carrying them reached the adapter whole (issue #68): a
+    // client that ended a line at either one would have hung instead.
+    assert_eq!(report["separators"]["searchContent"], SEPARATOR_MEMORY);
+    assert_eq!(report["separators"]["contextContent"], SEPARATOR_MEMORY);
+    assert_eq!(report["separators"]["fileContent"], SEPARATOR_FILE);
+
     // Negative controls: each refusal reached the adapter with Rust's code.
     assert_eq!(report["refusals"]["otherProjectWrite"], "scope_mismatch");
     assert_eq!(report["refusals"]["traversal"], "resolve_error");
@@ -196,6 +215,11 @@ fn node_adapters_round_trip_through_the_real_rust_stores() {
     let learning = memory.read_entry("probe-learning").unwrap();
     assert_eq!(learning.content, "stdio bridges need line framing");
     assert_eq!(learning.created_by, agent_id);
+    assert_eq!(
+        memory.read_entry("probe-separators").unwrap().content,
+        SEPARATOR_MEMORY,
+        "the separators were stored as sent"
+    );
     assert!(
         memory.read_entry("probe-smuggled").is_err(),
         "the refused cross-project write left nothing behind"
