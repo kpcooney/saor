@@ -75,9 +75,14 @@ The *intended* authority for "done" is machine-checked behavior plus mutation sc
 
 ## Phase 1 Scope (Foundation)
 
-**Done and merged**: SQLite memory store with FTS5 (#4), JSONL audit store (#5), reference resolver (#6), agent identity schema + PreToolUse scope enforcement (#7), PostToolUse audit hook (#10), Tauri scaffolding, system default standards.
+**Status lives in GitHub, not in this file.** [GitHub issues](https://github.com/kpcooney/saor/issues) are the single source of truth for what is done and what remains: `gh issue list` shows open work, `gh issue view <number>` shows the state of any one issue. Do not keep a done/remaining list here — one was kept, and it drifted from the tracker.
 
-**Remaining in Phase 1**: memory MCP server (#8) and reference-resolver MCP tool (#9) — both currently stubs; single Code Agent integration (#11); Tauri IPC commands (#12); basic UI — project creation, agent status, memory inspector (#13).
+**What Phase 1 covers**: one Code Agent running end to end on a local-first foundation. The issue numbers are for traceability; look an issue up for its current state.
+
+- **Rust-owned storage**: SQLite memory store with FTS5 (#4), JSONL audit store (#5), reference resolver (#6).
+- **Agent identity and enforcement**: identity schema and PreToolUse scope enforcement (#7), extended to shell commands and reads (#56) and to branches (#58); PostToolUse audit hook (#10).
+- **Agent tools and runtime**: memory MCP server (#8), reference-resolver MCP tool (#9), the single Code Agent (#11), and the Node↔Rust storage bridge that connects a launched agent to the Rust-owned stores (#59).
+- **App shell**: Tauri IPC commands (#12) and the basic UI — project creation, agent status, memory inspector, audit viewer (#13).
 
 **Not in scope (later phases)**: coordinator agents and multi-agent orchestration (Phase 2); reference manifest handoff protocol between agents (Phase 2); issue tracker MCP server (Phase 3); workflow engine, parallel execution, approval workflows (Phase 3); semantic search / vector embeddings (Phase 4); FIDO-like cryptographic identity (Phase 5); cloud backends for memory or audit.
 
