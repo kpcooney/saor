@@ -17,12 +17,14 @@ import {
   createBridgeAuditLogger,
   createBridgeMemoryStore,
   createBridgeReferenceResolver,
+  createBridgeTranscriptRecorder,
   PROJECT_CONTEXT_LIMIT,
 } from '../../src/bridge/adapters.js';
 import type { BridgeClient } from '../../src/bridge/client.js';
 import { BridgeRequestError, type BridgeMethod } from '../../src/bridge/protocol.js';
 import type { AuditEvent } from '../../src/hooks/audit-logger.js';
 import type { MemoryEntry } from '../../src/mcp/memory-server.js';
+import type { TranscriptEntry } from '../../src/transcript/entries.js';
 
 interface RecordedCall {
   readonly method: BridgeMethod;
@@ -215,5 +217,52 @@ describe('createBridgeReferenceResolver', () => {
         code: 'invalid_response',
       });
     }
+  });
+});
+
+describe('createBridgeTranscriptRecorder', () => {
+  function entry(text: string): TranscriptEntry {
+    return { timestamp: '2026-11-24T02:39:40.000Z', kind: 'message', text, details: {} };
+  }
+
+  it('sends each entry as a transcript.append request, in the order recorded', async () => {
+    const client = new FakeBridgeClient();
+    const recorder = createBridgeTranscriptRecorder(client);
+
+    recorder.record(entry('first'));
+    recorder.record(entry('second'));
+    await recorder.flush();
+
+    expect(client.calls).toEqual([
+      { method: 'transcript.append', params: { entry: entry('first') } },
+      { method: 'transcript.append', params: { entry: entry('second') } },
+    ]);
+  });
+
+  it('reports an entry the bridge refused and carries on', async () => {
+    const client = new FakeBridgeClient((call) => {
+      if ((call.params as { entry: TranscriptEntry }).entry.text === 'refused') {
+        throw new BridgeRequestError('store_error', 'disk full');
+      }
+      return null;
+    });
+    const diagnostics: string[] = [];
+    const recorder = createBridgeTranscriptRecorder(client, {
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+
+    recorder.record(entry('refused'));
+    recorder.record(entry('kept'));
+    // Neither record() nor flush() surfaces the failure to the agent run.
+    await expect(recorder.flush()).resolves.toBeUndefined();
+
+    expect(diagnostics).toEqual(['dropped a message entry: disk full']);
+    expect(client.calls).toHaveLength(2);
+  });
+
+  it('flushes immediately when nothing was recorded', async () => {
+    const recorder = createBridgeTranscriptRecorder(new FakeBridgeClient());
+
+    await expect(recorder.flush()).resolves.toBeUndefined();
   });
 });

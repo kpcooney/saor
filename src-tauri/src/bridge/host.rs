@@ -3,7 +3,7 @@
 // BridgeHost — the Rust end of the storage bridge (ADR-009). It is bound to the
 // one agent session it was created for and services that sidecar's request
 // lines against the session's project stores: the SQLite memory store, the
-// JSONL audit store, and the reference resolver.
+// JSONL audit store, the reference resolver, and the session's transcript.
 //
 // `handle_line` is the whole surface: one line of sidecar stdout in, and either
 // a response line to write back to the sidecar's stdin, a parsed status line,
@@ -14,7 +14,9 @@
 // Session binding: a `memory.write` or `audit.log` naming a different project,
 // or an `audit.log` naming a different session, is refused with
 // `scope_mismatch`. The sidecar cannot write into another project's stores or
-// attribute events to another session, whatever it sends.
+// attribute events to another session, whatever it sends. A
+// `transcript.append` carries no session at all: the entry is filed under the
+// bound session, so there is nothing for the sidecar to get wrong.
 //
 // Stores are opened per request, the same way the IPC commands do it (see
 // commands/memory.rs). That keeps the host free of long-lived connections and
@@ -29,11 +31,12 @@ use serde_json::{json, Value};
 use crate::audit::{AuditEvent, FileSystemAuditStore};
 use crate::memory::{MemoryCategory, MemoryEntry, SqliteMemoryStore};
 use crate::references::{resolve_ref, ResolvedReference};
+use crate::transcript::{FileSystemTranscriptStore, TranscriptEntry, TranscriptEntryKind};
 
 use super::protocol::{
     error_line, success_line, BridgeError, BridgeErrorCode, BridgeRequest, SidecarStatus,
     WireMemoryEntry, KIND_REQUEST, KIND_STATUS, METHOD_AUDIT_LOG, METHOD_MEMORY_RECENT,
-    METHOD_MEMORY_SEARCH, METHOD_MEMORY_WRITE, METHOD_REFERENCE_RESOLVE,
+    METHOD_MEMORY_SEARCH, METHOD_MEMORY_WRITE, METHOD_REFERENCE_RESOLVE, METHOD_TRANSCRIPT_APPEND,
 };
 
 /// Results returned by `memory.search` when the request gives no limit.
@@ -136,6 +139,7 @@ impl BridgeHost {
             METHOD_MEMORY_RECENT => self.memory_recent(parse_params(method, params)?),
             METHOD_AUDIT_LOG => self.audit_log(parse_params(method, params)?),
             METHOD_REFERENCE_RESOLVE => self.reference_resolve(parse_params(method, params)?),
+            METHOD_TRANSCRIPT_APPEND => self.transcript_append(parse_params(method, params)?),
             other => Err(BridgeError::new(
                 BridgeErrorCode::UnknownMethod,
                 format!("unknown bridge method \"{other}\""),
@@ -209,6 +213,23 @@ impl BridgeHost {
         })
     }
 
+    /// Appends one entry to the bound session's transcript. The sidecar sends
+    /// the entry without a session; it is always filed under the session this
+    /// host serves.
+    fn transcript_append(&self, params: TranscriptAppendParams) -> Result<Value, BridgeError> {
+        let entry = TranscriptEntry {
+            session_id: self.session_id.clone(),
+            timestamp: params.entry.timestamp,
+            kind: params.entry.kind,
+            text: params.entry.text,
+            details: params.entry.details,
+        };
+        FileSystemTranscriptStore::new(&self.project_path)
+            .and_then(|store| store.append(&entry))
+            .map_err(store_error)?;
+        Ok(Value::Null)
+    }
+
     /// Opens the bound project's memory database.
     fn open_memory(&self) -> Result<SqliteMemoryStore, BridgeError> {
         let db_path = self.project_path.join(".sdlc").join("memory.db");
@@ -259,6 +280,27 @@ struct AuditLogParams {
 #[derive(Deserialize)]
 struct ReferenceResolveParams {
     uri: String,
+}
+
+#[derive(Deserialize)]
+struct TranscriptAppendParams {
+    entry: WireTranscriptEntry,
+}
+
+/// A transcript entry as the sidecar sends it: a [`TranscriptEntry`] without
+/// the session, which the host supplies. Unknown fields — a `sessionId`
+/// included — are ignored.
+#[derive(Deserialize)]
+struct WireTranscriptEntry {
+    timestamp: String,
+    kind: TranscriptEntryKind,
+    text: String,
+    #[serde(default = "empty_details")]
+    details: Value,
+}
+
+fn empty_details() -> Value {
+    json!({})
 }
 
 /// Deserializes a method's params, mapping a shape mismatch to `invalid_params`.
@@ -515,6 +557,70 @@ mod tests {
 
         let store = FileSystemAuditStore::new(&fx.project_path).unwrap();
         assert!(store.get_recent(10).unwrap().is_empty(), "nothing logged");
+    }
+
+    #[test]
+    fn test_transcript_append_files_entries_under_the_bound_session() {
+        let fx = fixture();
+
+        let first = call(
+            &fx.host,
+            1,
+            "transcript.append",
+            json!({ "entry": {
+                "timestamp": "2026-11-24T02:39:40.000Z",
+                "kind": "message",
+                "text": "Looking at the project.",
+                "details": { "toolUseIds": ["tu-1"] },
+            } }),
+        );
+        assert_eq!(first["ok"], true, "{first}");
+        // An entry that tries to name another session, and omits details.
+        let second = call(
+            &fx.host,
+            2,
+            "transcript.append",
+            json!({ "entry": {
+                "sessionId": "some-other-session",
+                "timestamp": "2026-11-24T02:39:58.000Z",
+                "kind": "result",
+                "text": "Done.",
+            } }),
+        );
+        assert_eq!(second["ok"], true, "{second}");
+
+        let store = FileSystemTranscriptStore::new(&fx.project_path).unwrap();
+        let transcript = store.read(SESSION).unwrap();
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].session_id, SESSION);
+        assert_eq!(transcript[0].kind, TranscriptEntryKind::Message);
+        assert_eq!(transcript[0].details["toolUseIds"][0], "tu-1");
+        assert_eq!(transcript[1].session_id, SESSION);
+        assert_eq!(transcript[1].text, "Done.");
+        assert_eq!(transcript[1].details, json!({}));
+        // Negative control: nothing was filed under the session it named.
+        assert!(store.read("some-other-session").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_transcript_append_with_an_unknown_kind_is_refused_and_writes_nothing() {
+        let fx = fixture();
+
+        let response = call(
+            &fx.host,
+            1,
+            "transcript.append",
+            json!({ "entry": {
+                "timestamp": "2026-11-24T02:39:40.000Z",
+                "kind": "thought",
+                "text": "x",
+            } }),
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "invalid_params");
+        let store = FileSystemTranscriptStore::new(&fx.project_path).unwrap();
+        assert!(store.read(SESSION).unwrap().is_empty());
     }
 
     #[test]

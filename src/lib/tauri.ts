@@ -23,6 +23,7 @@ import type {
   MemoryCategory,
   MemoryEntry,
   Project,
+  TranscriptEntry,
 } from "./types";
 
 // --- Projects ---------------------------------------------------------------
@@ -120,4 +121,15 @@ export function agentStatus(sessionId: string): Promise<AgentStatus> {
 /** Stops a running agent and returns its final status. */
 export function agentStop(sessionId: string): Promise<AgentStatus> {
   return invoke("agent_stop", { sessionId });
+}
+
+/**
+ * Returns what an agent was asked, said, and ended with during a session,
+ * oldest first. Empty for a session that recorded nothing.
+ */
+export function agentTranscript(
+  projectId: string,
+  sessionId: string,
+): Promise<TranscriptEntry[]> {
+  return invoke("agent_transcript", { projectId, sessionId });
 }

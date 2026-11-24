@@ -114,9 +114,12 @@
     padding: 0.35rem 0.75rem;
     font-size: 0.85rem;
   }
+  /* Light chips in both colour schemes: each sets its own text colour rather
+     than inheriting the scheme's, which is near-white in dark mode. */
   .filters button.active {
     border-color: #396cd8;
     background: #eef3ff;
+    color: #1c46a0;
   }
   .events {
     list-style: none;
@@ -144,6 +147,7 @@
     padding: 0.1rem 0.45rem;
     border-radius: 4px;
     background: #eee;
+    color: #333;
   }
   .type-blocked,
   .type-failure {

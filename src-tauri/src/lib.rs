@@ -10,9 +10,11 @@
 //   audit/      — JSONL append-only audit trail
 //   bridge/     — Node↔Rust storage bridge serving a running agent (ADR-009)
 //   identity/   — AgentIdentity types and scope validation
+//   jsonl       — the append primitive shared by the JSONL stores
 //   references/ — URI scheme resolver for agent reference manifests
 //   process/    — Agent sidecar process lifecycle management
 //   project/    — App-level registry of known projects
+//   transcript/ — Per-session record of what an agent said (ADR-013)
 //   commands/   — Tauri IPC command handlers (thin wrappers over the above)
 //
 // See src-tauri/README.md for the full responsibility breakdown.
@@ -28,10 +30,12 @@ pub mod audit;
 pub mod bridge;
 pub mod commands;
 pub mod identity;
+pub mod jsonl;
 pub mod memory;
 pub mod process;
 pub mod project;
 pub mod references;
+pub mod transcript;
 
 use process::manager::AgentProcessManager;
 use process::spawner::TauriAgentSpawner;
@@ -111,6 +115,7 @@ pub fn run() {
             commands::agent::agent_start,
             commands::agent::agent_status,
             commands::agent::agent_stop,
+            commands::transcript::agent_transcript,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,6 +31,7 @@
 mod issue_004_memory_store;
 mod issue_005_audit_store;
 mod issue_006_reference_resolver;
+mod issue_078_session_transcript;
 
 /// A file in this directory that `main.rs` does not declare is never compiled,
 /// so its tests would be skipped without any warning while the tier stayed

@@ -32,6 +32,8 @@ export const BRIDGE_METHODS = {
   auditLog: 'audit.log',
   /** Dereference one reference-manifest URI. */
   referenceResolve: 'reference.resolve',
+  /** Append one entry to the session's transcript. */
+  transcriptAppend: 'transcript.append',
 } as const;
 
 /** A method name the bridge serves. */

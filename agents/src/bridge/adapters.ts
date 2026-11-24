@@ -1,9 +1,10 @@
 /**
  * agents/src/bridge/adapters.ts
  *
- * The concrete implementations of the agent layer's three storage ports —
- * {@link MemoryStore}, {@link AuditLogger}, and {@link ReferenceResolver} —
- * backed by the Rust stores through the storage bridge (ADR-009). These are the
+ * The concrete implementations of the agent layer's storage ports —
+ * {@link MemoryStore}, {@link AuditLogger}, {@link ReferenceResolver}, and
+ * {@link TranscriptRecorder} — backed by the Rust stores through the storage
+ * bridge (ADR-009). These are the
  * "IPC-backed adapters" the MCP servers and hooks were written against; with
  * them a launched agent reads and writes the same memory database and audit
  * trail the UI shows.
@@ -31,6 +32,7 @@ import type {
   ProjectContext,
 } from '../mcp/memory-server.js';
 import type { ReferenceResolver, ResolvedReference } from '../mcp/reference-resolver.js';
+import type { TranscriptEntry, TranscriptRecorder } from '../transcript/entries.js';
 
 import type { BridgeClient } from './client.js';
 import { BRIDGE_METHODS, BridgeRequestError, type BridgeMethod } from './protocol.js';
@@ -206,6 +208,59 @@ export function createBridgeReferenceResolver(client: BridgeClient): ReferenceRe
         throw invalidResponse(BRIDGE_METHODS.referenceResolve);
       }
       return result;
+    },
+  };
+}
+
+/** Optional behavior for {@link createBridgeTranscriptRecorder}. */
+export interface BridgeTranscriptRecorderOptions {
+  /**
+   * Receives a note about each entry that could not be stored. Defaults to
+   * stderr — stdout is the protocol channel.
+   */
+  readonly onDiagnostic?: (message: string) => void;
+}
+
+/**
+ * A {@link TranscriptRecorder} backed by the project's Rust transcript store
+ * (ADR-013). Each entry is one `transcript.append` request; Rust files it
+ * under the session the bridge is bound to.
+ *
+ * Requests are written in the order entries are recorded and Rust services a
+ * process's requests in order, so the stored transcript keeps that order
+ * without the recorder waiting for each response. A refused or failed append
+ * is reported through `onDiagnostic` and otherwise dropped: the agent run
+ * carries on with a gap in its transcript.
+ */
+export function createBridgeTranscriptRecorder(
+  client: BridgeClient,
+  options: BridgeTranscriptRecorderOptions = {},
+): TranscriptRecorder {
+  const onDiagnostic =
+    options.onDiagnostic ??
+    ((message: string) => {
+      console.error(`transcript: ${message}`);
+    });
+  const inFlight = new Set<Promise<void>>();
+
+  return {
+    record(entry: TranscriptEntry): void {
+      const append = client
+        .request(BRIDGE_METHODS.transcriptAppend, { entry })
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            const reason = error instanceof Error ? error.message : String(error);
+            onDiagnostic(`dropped a ${entry.kind} entry: ${reason}`);
+          },
+        )
+        .finally(() => {
+          inFlight.delete(append);
+        });
+      inFlight.add(append);
+    },
+    async flush(): Promise<void> {
+      await Promise.all(inFlight);
     },
   };
 }
