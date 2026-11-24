@@ -205,8 +205,12 @@ export interface CodeAgentIdentityOptions {
   /**
    * The issue this agent is acting on, e.g. "11". Recorded as the single
    * in-scope issue (and used to stamp audit events with an issue reference).
+   *
+   * Optional because a launch from the UI does not yet name one (`agent_start`
+   * carries only a task). Without it the agent has no in-scope issue and its
+   * audit events carry no `issueRef`.
    */
-  readonly issue: string;
+  readonly issue?: string;
   /**
    * Explicit identity id. Defaults to a generated `agent:code-agent:{uuid}`.
    */
@@ -237,7 +241,7 @@ export function createCodeAgentIdentity(
   options: CodeAgentIdentityOptions,
 ): AgentIdentity {
   const scope: AgentScope = {
-    issues: [options.issue],
+    issues: options.issue !== undefined ? [options.issue] : [],
     files: CODE_AGENT_FILE_SCOPE,
     branches: options.branches ?? defaultCodeAgentBranches(options.issue),
     tools: CODE_AGENT_TOOLS,
@@ -286,8 +290,8 @@ export function buildCodeAgentSystemPrompt(identity: AgentIdentity): string {
 /**
  * The ports and runtime context needed to wire the Code Agent to its backends.
  * The stores are injected through their ports (CLAUDE.md principle 5) so the
- * same wiring works against the in-process test stores today and the
- * IPC-backed adapters that land with issue #12.
+ * same wiring works against the in-process test stores and the bridge-backed
+ * adapters a launched agent uses (agents/src/bridge/adapters.ts).
  */
 export interface CodeAgentRuntimeConfig {
   /** The Code Agent's identity (see {@link createCodeAgentIdentity}). */

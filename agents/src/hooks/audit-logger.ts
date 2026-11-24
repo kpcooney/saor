@@ -41,9 +41,10 @@
  * event is reported to stderr but never breaks the tool flow, and the hooks
  * never alter the tool's permission decision or output.
  *
- * The concrete AuditLogger implementation that transports events to the Rust
- * store over Tauri IPC is provided separately; this module depends only on the
- * `AuditLogger` interface so tests can inject a recording double.
+ * The concrete AuditLogger that transports events to the Rust store is
+ * `createBridgeAuditLogger` in ../bridge/adapters.ts (issue #59); this module
+ * depends only on the `AuditLogger` interface so tests can inject a recording
+ * double.
  *
  * See docs/architecture/sdlc-agent-architecture-research-v4.md Section 8
  * for the audit trail design, Section 8.2 for the event schema, and Section 8.5
@@ -133,7 +134,12 @@ export interface AuditEvent {
   readonly issueRef?: string;
   /** Initiative reference, e.g. "PROJ-100". Omitted when not applicable. */
   readonly initiativeRef?: string;
-  /** Claude SDK session id, for grouping events from the same session. */
+  /**
+   * Session id, for grouping events from the same agent run. The hooks stamp
+   * the Claude SDK session id they are handed; for a launched agent the bridge
+   * audit logger restamps it with the Saor session id and keeps the SDK's as
+   * `details.sdkSessionId` (see ../bridge/adapters.ts).
+   */
   readonly sessionId: string;
   /** Outcome of the action. */
   readonly result: AuditResult;
@@ -143,11 +149,12 @@ export interface AuditEvent {
 
 /**
  * The contract for anything that writes to the audit trail. Hooks depend on
- * this interface rather than a concrete store so that the transport (Tauri IPC
- * to the Rust audit store) can be swapped without touching hook logic, and so
- * that tests can inject a recording double.
+ * this interface rather than a concrete store so that the transport (the
+ * storage bridge to the Rust audit store) can be swapped without touching hook
+ * logic, and so that tests can inject a recording double.
  *
- * The concrete IPC-backed implementation is provided in issue #10.
+ * The concrete bridge-backed implementation is `createBridgeAuditLogger` in
+ * ../bridge/adapters.ts.
  */
 export interface AuditLogger {
   /** Append a fully-formed event to the audit trail. */

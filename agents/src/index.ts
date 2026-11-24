@@ -45,8 +45,8 @@ export type {
   PreToolUseHookCallback,
 } from './hooks/scope-enforcement.js';
 
-// Audit trail contract (defined here in issue #7; the IPC-backed logger and
-// the PostToolUse hook land in issue #10).
+// Audit trail contract (issue #7) and hooks (issue #10). The logger that
+// carries events to the Rust audit store is in the storage bridge, below.
 export type {
   AuditEvent,
   AuditEventType,
@@ -56,8 +56,7 @@ export type {
 
 // Reference-resolver MCP server (issue #8/#9): the `resolve_ref` tool that
 // dereferences reference-manifest URIs, defined against the ReferenceResolver
-// port. The concrete IPC-backed resolver adapter lands with the Tauri IPC work
-// (issue #12).
+// port. The Rust-backed resolver adapter is in the storage bridge, below.
 export {
   createReferenceResolverMcpServer,
   resolveReference,
@@ -71,8 +70,8 @@ export type {
   ReferenceResolverMcpServerConfig,
 } from './mcp/reference-resolver.js';
 // Memory MCP server (issue #8): the in-process MCP tools for reading and
-// writing project memory, defined against the MemoryStore port. The concrete
-// IPC-backed store adapter lands with the Tauri IPC work (issue #12).
+// writing project memory, defined against the MemoryStore port. The Rust-backed
+// store adapter is in the storage bridge, below.
 export {
   createMemoryMcpServer,
   memoryRead,
@@ -157,3 +156,25 @@ export type { BranchState, ReadTextFile } from './git/branch-state.js';
 export { listLooseBranchNames, resolveBashGitAccess } from './sandbox/git-access.js';
 export type { BashGitAccess, GitAccessInput } from './sandbox/git-access.js';
 export { gitDeniedWritePaths } from './sandbox/bash-sandbox.js';
+
+// Storage bridge (issue #59, ADR-009): the client that exchanges line-delimited
+// JSON with the Rust backend over the sidecar's stdio, and the adapters that
+// implement the memory, audit, and reference ports on top of it.
+export { createBridgeClient } from './bridge/client.js';
+export type { BridgeClient, BridgeClientOptions, BridgeStreams } from './bridge/client.js';
+export {
+  createBridgeAuditLogger,
+  createBridgeMemoryStore,
+  createBridgeReferenceResolver,
+  PROJECT_CONTEXT_LIMIT,
+} from './bridge/adapters.js';
+export type { BridgeAuditLoggerConfig } from './bridge/adapters.js';
+export { BRIDGE_METHODS, BridgeRequestError } from './bridge/protocol.js';
+export type {
+  BridgeErrorCode,
+  BridgeMethod,
+  BridgeRequest,
+  BridgeResponse,
+  SidecarStatusLine,
+  SidecarStatusName,
+} from './bridge/protocol.js';

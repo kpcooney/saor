@@ -3,85 +3,67 @@
  *
  * The agent-layer process entrypoint. The Rust `AgentProcessManager` launches
  * this script with `node dist/sidecar.js --session … --project … --task …`
- * (see src-tauri/src/process/spawner.rs), and manages its lifecycle: it is the
+ * (see src-tauri/src/process/spawner.rs) and manages its lifecycle: it is the
  * process that `agent_start` spawns and `agent_stop` kills.
  *
- * Phase 1 scope: this is a minimal, dependency-light runner. It parses its
- * launch arguments, announces itself on stdout as a JSON line (which the Rust
- * side currently drains), heartbeats so the manager has a live process to
- * track, and shuts down cleanly on SIGTERM.
+ * It runs the real Code Agent. The agent's memory, audit, and reference ports
+ * are backed by the Rust-owned stores through the storage bridge — line-
+ * delimited JSON over this process's own stdin/stdout (ADR-009). Because
+ * stdout is that protocol channel, nothing here or below may `console.log`;
+ * diagnostics go to stderr.
  *
- * It does NOT yet run the real Code Agent against Rust-owned memory/audit: a
- * Node subprocess cannot call Tauri `invoke`, so the agent's memory/audit/
- * reference ports need a dedicated Node↔Rust storage bridge. Wiring
- * `runCodeAgent` (agents/src/definitions/code-agent.ts) in behind that bridge
- * is a tracked follow-up. Until then this entrypoint proves the spawn → track
- * → stop lifecycle end to end.
+ * This file is only the process glue (real streams, signals, exit code). The
+ * run itself is `runSidecar` in sidecar-runner.ts, which is where the tests
+ * are.
  */
 
-/** The launch arguments passed by the Rust spawner. */
-interface SidecarArgs {
-  session: string;
-  project: string;
-  projectPath: string;
-  agentType: string;
-  task: string;
-}
+import { runCodeAgent } from './definitions/code-agent.js';
+import { EXIT_FAILED, parseSidecarArgs, runSidecar } from './sidecar-runner.js';
 
-/** How often (ms) the sidecar emits a heartbeat line while running. */
-const HEARTBEAT_INTERVAL_MS = 5000;
+/** Conventional exit code for death by signal: 128 + the signal number. */
+const SIGNAL_EXIT_BASE = 128;
+const SIGNAL_NUMBERS = { SIGINT: 2, SIGTERM: 15 } as const;
 
 /**
- * Parse `--flag value` pairs from argv into the known launch arguments.
- * Unknown flags are ignored; missing ones default to an empty string so the
- * process still starts (the Rust side always supplies the full set).
+ * Report `stopped` and exit when asked to terminate. The exit code is non-zero
+ * so that a termination Rust did not itself request reads as a failed run, not
+ * a completed one. (A stop from the process manager is a hard kill, which this
+ * handler never sees; Rust has already marked that session stopped.)
  */
-function parseArgs(argv: readonly string[]): SidecarArgs {
-  const flags: Record<string, string> = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token !== undefined && token.startsWith('--')) {
-      flags[token.slice(2)] = argv[i + 1] ?? '';
-      i += 1;
-    }
-  }
-  return {
-    session: flags['session'] ?? '',
-    project: flags['project'] ?? '',
-    projectPath: flags['project-path'] ?? '',
-    agentType: flags['agent-type'] ?? '',
-    task: flags['task'] ?? '',
-  };
-}
-
-/** Emit a single JSON status line to stdout. */
-function emit(status: string, args: SidecarArgs, extra: Record<string, unknown> = {}): void {
-  const line = JSON.stringify({
-    status,
-    session: args.session,
-    project: args.project,
-    agentType: args.agentType,
-    ...extra,
+function exitOnSignal(signal: keyof typeof SIGNAL_NUMBERS, argv: readonly string[]): void {
+  process.on(signal, () => {
+    const args = parseSidecarArgs(argv);
+    const line = JSON.stringify({ kind: 'status', status: 'stopped', session: args.session });
+    process.stdout.write(`${line}\n`, () => {
+      process.exit(SIGNAL_EXIT_BASE + SIGNAL_NUMBERS[signal]);
+    });
   });
-  // eslint-disable-next-line no-console -- stdout is the sidecar's status channel
-  console.log(line);
 }
 
-function main(): void {
-  const args = parseArgs(process.argv.slice(2));
-  emit('started', args, { pid: process.pid, task: args.task });
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  exitOnSignal('SIGTERM', argv);
+  exitOnSignal('SIGINT', argv);
 
-  const heartbeat = setInterval(() => emit('heartbeat', args), HEARTBEAT_INTERVAL_MS);
-  // Don't let the heartbeat timer keep the event loop alive on its own.
-  heartbeat.unref();
+  let exitCode: number;
+  try {
+    exitCode = await runSidecar({
+      argv,
+      input: process.stdin,
+      output: process.stdout,
+      runAgent: runCodeAgent,
+    });
+  } catch (error) {
+    // runSidecar reports its own failures; reaching here means it could not
+    // even do that.
+    console.error('sidecar: unexpected failure', error);
+    exitCode = EXIT_FAILED;
+  }
 
-  const shutdown = (): void => {
-    clearInterval(heartbeat);
-    emit('stopped', args);
-    process.exit(0);
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  // Exit explicitly, but only once stdout has flushed the final status line.
+  process.stdout.write('', () => {
+    process.exit(exitCode);
+  });
 }
 
-main();
+void main();

@@ -171,7 +171,9 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initiative_ref: Option<String>,
 
-    /// Claude SDK session ID for grouping events from the same session.
+    /// Session ID for grouping events from the same agent run. For a launched
+    /// agent this is the Saor session id the process manager assigned; the
+    /// Claude SDK's own session id is kept in `details.sdkSessionId` (ADR-009).
     pub session_id: String,
 
     /// Outcome of the action.
