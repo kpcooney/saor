@@ -10,7 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "test:acceptance": "npm --prefix agents run test:acceptance && cargo test --manifest-path src-tauri/Cargo.toml --test acceptance"
+    "test:acceptance": "npm --prefix agents run test:acceptance; ts=$?; cargo test --manifest-path src-tauri/Cargo.toml --test acceptance; rust=$?; exit $((ts || rust))"
   },
   "license": "MIT",
   "dependencies": {

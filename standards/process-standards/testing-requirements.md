@@ -10,7 +10,7 @@ Kevin cannot fluently line-by-line review across Rust, Svelte, and TypeScript. T
 
 **What ADR-007 adopts, and where each part stands:**
 
-- A tagged **acceptance tier**, separate from the unit suite — **built** (#50). Each acceptance test maps to a GitHub issue and is the executable definition of done for it. Acceptance tests use **real stores** (temp-dir files, in-memory SQLite) and verify side effects by reading them back — no mocks at this tier. Each includes a **negative control**, so a green result can't be green for the wrong reason. How to run and extend it is in [Acceptance Tests](#acceptance-tests) below.
+- A tagged **acceptance tier**, separate from the unit suite — **built** (#50). Each acceptance test maps to a GitHub issue and is the executable definition of done for it. Acceptance tests use **real stores** (files and SQLite databases in a temp directory) and verify side effects by reading them back — no mocks at this tier. Each includes a **negative control**, so a green result can't be green for the wrong reason. How to run and extend it is in [Acceptance Tests](#acceptance-tests) below.
 - **Mutation testing** on the load-bearing modules (identity/scope, audit, reference resolver, memory store, standards resolution) — **not yet built**, tracked by #51. Mutation score — not coverage — measures whether the tests would actually catch a regression. Until it lands, treat the mutation language as the target, not the current process.
 - The PR summary and any agent self-review are **orientation only** — they tell Kevin where to look; they do not close the issue.
 
@@ -35,14 +35,16 @@ npm run test:acceptance                               # repository root: the who
 - TypeScript: `agents/tests/acceptance/issue-NNN-<capability>.acceptance.test.ts`, with the `describe` title starting `#N`.
 - Rust: `src-tauri/tests/acceptance/issue_NNN_<capability>.rs`, declared as a module in `tests/acceptance/main.rs`.
 
+A file that is in the directory but not wired in would never run, so each half has a test that fails on one: a Rust file missing its `mod` line, or a TypeScript file not named `issue-NNN-<capability>.acceptance.test.ts`. An issue that extends an earlier capability (branch scope, #58, extending scope enforcement, #7) gets its own file.
+
 **What each acceptance test must do:**
 
 - State the issue's definition of done in the file header, in terms of behavior a user of the capability would recognise.
-- Drive the capability through its public interface, against real stores: files and SQLite databases in a temp directory, a real git repository where the branch matters. No mocks, no recording doubles, no reaching into private state.
+- Drive the capability through its public interface, against real stores: files and SQLite databases in a temp directory (on disk, not in-memory, so they can be reopened), a real git repository where the branch matters. No store, hook or collaborator is mocked or replaced by a recording double, and nothing reaches into private state. The one permitted double is a spy on process output (`console.error`) when the behavior being pinned is that a failure is reported there.
 - Verify side effects by reading them back — through a reopened store or the raw file where that is possible, not only through the handle that wrote them.
 - Carry a negative control: an assertion that fails if the capability is replaced by something degenerate. A test that a write is blocked also shows the matching in-scope write is allowed; a test that a query finds an entry also shows a non-matching query finds nothing.
 
-**Which issues are covered:** #4 (memory store), #5 (audit store), #6 (reference resolver), #7 (identity and scope enforcement), #10 (audit hooks). When work on an issue changes one of these capabilities, its acceptance file changes in the same PR; a new capability gets a new file. The remaining Phase 1 issues have unit and integration coverage but no acceptance file yet.
+**Which issues are covered:** the files in the two acceptance directories are the list — it is not repeated here, so it cannot drift. When work on an issue changes a covered capability, its acceptance file changes in the same PR; a new capability gets a new file. Not every Phase 1 issue has an acceptance file yet; those without one have unit and integration coverage only.
 
 **Acceptance or unit?** An acceptance test answers "does the capability the issue promised work, end to end, from the outside?". A unit test answers "does this function handle this case?". Edge cases, error-message wording and internal helpers belong in the unit suite; the acceptance tier stays small enough to read as a statement of what done means.
 
@@ -122,6 +124,6 @@ Name tests to describe the behavior being verified, not the function being calle
 
 ## Test Infrastructure
 
-- **Rust storage tests**: use `rusqlite::Connection::open_in_memory()` — fast, no file system setup, no cleanup needed.
+- **Rust storage tests**: unit tests use `rusqlite::Connection::open_in_memory()` — fast, no file system setup, no cleanup needed. Acceptance tests use a database file in a `tempfile::tempdir()` instead, so the store can be closed and reopened.
 - **TypeScript tests**: use `vitest`. No jest, no mocha.
 - **Temp directories**: for file system tests in TypeScript, use `node:os` `tmpdir()` + a unique subdirectory, and clean up in `afterEach`.

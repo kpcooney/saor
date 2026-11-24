@@ -3,9 +3,9 @@
 **Status**: accepted
 
 **Implementation status**: Partly built. The **acceptance tier exists** (#50; mechanics in
-[ADR-012](012-acceptance-tier-mechanics.md)) and covers the memory store, audit store, reference
-resolver, identity/scope enforcement and the audit hooks; the other Phase 1 issues are not yet
-backfilled. **Mutation testing is not yet built** (#51), and nothing runs either automatically —
+[ADR-012](012-acceptance-tier-mechanics.md)); not every Phase 1 issue has an acceptance file yet —
+the files in the two acceptance directories are the list of those that do. **Mutation testing is
+not yet built** (#51), and nothing runs either automatically —
 there is no CI, so the tier is a command the author runs. Today's gate is therefore the unit
 suite plus the acceptance tier, run locally, plus human review (optionally `/review-branch`).
 
