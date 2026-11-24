@@ -314,6 +314,14 @@ export function buildSessionTimeline(
   }
   groups.sort((a, b) => a.time - b.time);
 
+  // The SDK reports the agent's last message again as the run's result. The
+  // view shows the result on its own, so the repeat is left out of the timeline.
+  const items = groups.flatMap((group) => group.items);
+  const last = items.at(-1);
+  if (outcome !== undefined && last?.type === "message" && last.text === outcome.text.trim()) {
+    items.pop();
+  }
+
   const changedFiles: string[] = [];
   for (const call of calls.values()) {
     if (
@@ -329,7 +337,7 @@ export function buildSessionTimeline(
   const failureReason = events.find((event) => event.eventType === "agent.failed")?.reason;
 
   return {
-    items: groups.flatMap((group) => group.items),
+    items,
     ...(outcome !== undefined ? { outcome } : {}),
     changedFiles,
     ...(failureReason ? { failureReason } : {}),
