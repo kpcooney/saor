@@ -8,6 +8,7 @@
 // Module layout:
 //   memory/     — SQLite memory store with FTS5 full-text search
 //   audit/      — JSONL append-only audit trail
+//   bridge/     — Node↔Rust storage bridge serving a running agent (ADR-009)
 //   identity/   — AgentIdentity types and scope validation
 //   references/ — URI scheme resolver for agent reference manifests
 //   process/    — Agent sidecar process lifecycle management
@@ -24,6 +25,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 pub mod audit;
+pub mod bridge;
 pub mod commands;
 pub mod identity;
 pub mod memory;
@@ -52,6 +54,23 @@ fn agent_entry_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agents/dist/sidecar.js"))
 }
 
+/// Resolves the system-default standards directory — the base tier that an
+/// agent's `standards://` references fall back to when the project has no
+/// override (see references/resolver.rs).
+///
+/// `SAOR_STANDARDS_ROOT` overrides it; otherwise it defaults to
+/// `<repo>/standards`, resolved the same way as [`agent_entry_path`]. Bundling
+/// the standards tree with a packaged app is future work.
+fn standards_root_path() -> PathBuf {
+    if let Ok(explicit) = std::env::var("SAOR_STANDARDS_ROOT") {
+        return PathBuf::from(explicit);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|repo_root| repo_root.join("standards"))
+        .unwrap_or_else(|| PathBuf::from("standards"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -73,7 +92,8 @@ pub fn run() {
 
             // Build the agent process manager backed by the real Tauri-shell
             // spawner and manage it as shared state.
-            let spawner = TauriAgentSpawner::new(handle.clone(), agent_entry_path());
+            let spawner =
+                TauriAgentSpawner::new(handle.clone(), agent_entry_path(), standards_root_path());
             app.manage(Mutex::new(AgentProcessManager::new(Box::new(spawner))));
 
             Ok(())

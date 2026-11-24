@@ -19,7 +19,7 @@
 
 use rusqlite::{params, Connection};
 
-use super::schema::{MemoryEntry, MemoryError};
+use super::schema::{MemoryCategory, MemoryEntry, MemoryError};
 use super::store::{row_to_entry, unwrap_row_to_entry_error};
 
 /// Searches memory entries using FTS5 keyword matching, returning results
@@ -36,15 +36,32 @@ pub fn keyword_search(
     query: &str,
     limit: i64,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    keyword_search_in_category(conn, query, None, limit)
+}
+
+/// [`keyword_search`] restricted to a single category when `category` is
+/// `Some`. The filter is applied inside the query, before `LIMIT`, so a
+/// category search returns up to `limit` entries *of that category* rather
+/// than whatever survives filtering the top `limit` overall.
+pub fn keyword_search_in_category(
+    conn: &Connection,
+    query: &str,
+    category: Option<&MemoryCategory>,
+    limit: i64,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
     // Join memory_fts with memory_entries to get the full row data.
     // bm25(memory_fts) returns a negative relevance score (more negative = more relevant),
     // so we ORDER BY rank ASC (or equivalently, by bm25 ascending).
+    //
+    // `?3 IS NULL OR …` makes the category filter optional in one statement:
+    // binding NULL matches every category.
     let mut stmt = conn.prepare(
         "SELECT me.id, me.project_id, me.category, me.content, me.metadata,
                 me.created_by, me.created_at, me.weight
          FROM memory_fts fts
          JOIN memory_entries me ON me.rowid = fts.rowid
          WHERE memory_fts MATCH ?1
+           AND (?3 IS NULL OR me.category = ?3)
          ORDER BY fts.rank
          LIMIT ?2",
     )?;
@@ -57,8 +74,9 @@ pub fn keyword_search(
     // unwrap_row_to_entry_error so InvalidCategory / InvalidMetadata
     // surface as top-level MemoryError variants rather than being
     // buried inside MemoryError::Database(FromSqlConversionFailure(...)).
+    let category = category.map(MemoryCategory::to_string);
     let entries = stmt
-        .query_map(params![query, limit], row_to_entry)?
+        .query_map(params![query, limit, category], row_to_entry)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(unwrap_row_to_entry_error)?;
 
@@ -95,6 +113,48 @@ mod tests {
             created_at: "2026-02-25T12:00:00Z".to_string(),
             weight: 1.0,
         }
+    }
+
+    #[test]
+    fn test_keyword_search_in_category_filters_before_the_limit() {
+        let store = SqliteMemoryStore::new_in_memory().unwrap();
+        insert_test_project(&store);
+        let conn = store.connection();
+
+        // Three learnings and one convention all match "bridge".
+        for id in ["l1", "l2", "l3"] {
+            store
+                .write_entry(&make_entry(
+                    id,
+                    "bridge transport learning",
+                    MemoryCategory::Learning,
+                ))
+                .unwrap();
+        }
+        store
+            .write_entry(&make_entry(
+                "c1",
+                "bridge naming convention",
+                MemoryCategory::Convention,
+            ))
+            .unwrap();
+
+        // With a limit of 1, the convention is still found: the filter runs
+        // inside the query, not over the top-1 overall.
+        let conventions =
+            keyword_search_in_category(conn, "bridge", Some(&MemoryCategory::Convention), 1)
+                .unwrap();
+        assert_eq!(conventions.len(), 1);
+        assert_eq!(conventions[0].id, "c1");
+
+        // Negative control: no category returns entries across categories.
+        let all = keyword_search_in_category(conn, "bridge", None, 10).unwrap();
+        assert_eq!(all.len(), 4);
+
+        // A category with no matches returns nothing.
+        let none =
+            keyword_search_in_category(conn, "bridge", Some(&MemoryCategory::Index), 10).unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -193,7 +253,11 @@ mod tests {
             ))
             .unwrap();
         store
-            .write_entry(&make_entry("short", "uses a database", MemoryCategory::Context))
+            .write_entry(&make_entry(
+                "short",
+                "uses a database",
+                MemoryCategory::Context,
+            ))
             .unwrap();
 
         let results = keyword_search(conn, "database", 10).unwrap();
@@ -239,7 +303,11 @@ mod tests {
             .unwrap();
 
         let results = keyword_search(conn, "rust OR async", 10).unwrap();
-        assert_eq!(results.len(), 3, "all three entries match at least one term");
+        assert_eq!(
+            results.len(),
+            3,
+            "all three entries match at least one term"
+        );
         assert_eq!(
             results[0].id, "both",
             "the entry matching both terms must rank first"
@@ -525,7 +593,10 @@ mod tests {
         let after_gadgets = keyword_search(conn, "gadgets", 10).unwrap();
         assert_eq!(after_gadgets.len(), 1);
         assert_eq!(after_gadgets[0].id, "to-update");
-        assert_eq!(after_gadgets[0].content, "replacement content about gadgets");
+        assert_eq!(
+            after_gadgets[0].content,
+            "replacement content about gadgets"
+        );
 
         // Old content is no longer searchable.
         let after_widgets = keyword_search(conn, "widgets", 10).unwrap();

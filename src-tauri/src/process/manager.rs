@@ -16,10 +16,14 @@
 // `kill` takes `self: Box<Self>` and the manager takes the handle out of the
 // session before killing it.
 //
-// The running agent cannot yet read/write Rust-owned memory and audit stores —
-// a Node subprocess cannot call Tauri `invoke`, so that requires a dedicated
-// Node↔Rust storage bridge, tracked as a follow-up. Until then the spawned
-// process runs the minimal `agents/src/sidecar.ts` entrypoint.
+// A session leaves `Active` in one of two ways: an explicit `stop` (the manager
+// kills the process → `Stopped`), or the process exiting on its own, which the
+// spawner reports through `mark_exited` (→ `Completed` or `Failed`). Whichever
+// happens first wins; the other is then a no-op.
+//
+// The running agent reaches the Rust-owned memory and audit stores through the
+// Node↔Rust storage bridge (bridge/, ADR-009), which the spawner attaches to
+// the process it launches.
 //
 // See docs/architecture/sdlc-agent-architecture-research-v4.md Section 2.3
 // and docs/adr/002-agent-process-strategy.md.
@@ -38,9 +42,10 @@ use uuid::Uuid;
 pub enum AgentStatus {
     /// The process was spawned and is being tracked.
     Active,
-    /// The process finished on its own (reserved for bridge-era exit tracking).
+    /// The process finished on its own with a zero exit code.
     Completed,
-    /// The process failed (reserved for bridge-era exit tracking).
+    /// The process exited on its own with a non-zero code or was killed by a
+    /// signal the manager did not send.
     Failed,
     /// The process was stopped by an explicit `stop` call.
     Stopped,
@@ -144,20 +149,46 @@ impl AgentProcessManager {
             .map(|s| s.info.status.clone())
     }
 
-    /// Stops a running session: kills the process (if still running) and marks
-    /// the session `Stopped`. Returns the updated session, or an error if the
-    /// session is unknown. Stopping an already-stopped session is a no-op kill
-    /// and returns the session unchanged.
+    /// Stops a running session: kills the process and marks the session
+    /// `Stopped`. Returns the updated session, or an error if the session is
+    /// unknown. Stopping a session that is no longer `Active` — already
+    /// stopped, or already exited on its own — is a no-op and returns the
+    /// session unchanged.
     pub fn stop(&mut self, session_id: &str) -> Result<AgentSession, String> {
         let running = self
             .sessions
             .get_mut(session_id)
             .ok_or_else(|| unknown_session(session_id))?;
-        if let Some(handle) = running.handle.take() {
-            handle.kill()?;
+        if running.info.status == AgentStatus::Active {
+            if let Some(handle) = running.handle.take() {
+                handle.kill()?;
+            }
+            running.info.status = AgentStatus::Stopped;
         }
-        running.info.status = AgentStatus::Stopped;
         Ok(running.info.clone())
+    }
+
+    /// Records that a session's process exited on its own: `Completed` when
+    /// `succeeded`, otherwise `Failed`.
+    ///
+    /// Returns the updated session only when this call made the transition.
+    /// It returns `None` — and changes nothing — for an unknown session or one
+    /// that already left `Active`, which is what happens when the exit being
+    /// reported is the kill from an earlier `stop`. Callers use the `Some` to
+    /// decide whether there is a lifecycle event to record.
+    pub fn mark_exited(&mut self, session_id: &str, succeeded: bool) -> Option<AgentSession> {
+        let running = self.sessions.get_mut(session_id)?;
+        if running.info.status != AgentStatus::Active {
+            return None;
+        }
+        // The process is gone; drop the handle so nothing tries to kill it.
+        running.handle = None;
+        running.info.status = if succeeded {
+            AgentStatus::Completed
+        } else {
+            AgentStatus::Failed
+        };
+        Some(running.info.clone())
     }
 
     fn session_or_err(&self, session_id: &str) -> Result<&RunningSession, String> {
@@ -280,6 +311,56 @@ mod tests {
             !killed.load(Ordering::SeqCst),
             "second stop must not kill again"
         );
+    }
+
+    #[test]
+    fn test_mark_exited_records_completed_or_failed_for_an_active_session() {
+        let (mut manager, _count, killed) = manager_with(false);
+        let ok = manager
+            .start("proj-1", Path::new("/tmp/proj"), "code-agent", "task")
+            .unwrap();
+        let bad = manager
+            .start("proj-1", Path::new("/tmp/proj"), "code-agent", "task")
+            .unwrap();
+
+        let completed = manager.mark_exited(&ok.session_id, true).unwrap();
+        assert_eq!(completed.status, AgentStatus::Completed);
+        let failed = manager.mark_exited(&bad.session_id, false).unwrap();
+        assert_eq!(failed.status, AgentStatus::Failed);
+        assert_eq!(
+            manager.status(&bad.session_id).unwrap(),
+            AgentStatus::Failed
+        );
+
+        // Stopping a session that already exited neither kills nor relabels it.
+        let after_stop = manager.stop(&ok.session_id).unwrap();
+        assert_eq!(after_stop.status, AgentStatus::Completed);
+        assert!(
+            !killed.load(Ordering::SeqCst),
+            "no kill for an exited process"
+        );
+    }
+
+    #[test]
+    fn test_mark_exited_is_a_noop_once_the_session_left_active() {
+        let (mut manager, _count, _killed) = manager_with(false);
+        let session = manager
+            .start("proj-1", Path::new("/tmp/proj"), "code-agent", "task")
+            .unwrap();
+
+        // The exit that follows an explicit stop is the kill itself, not a
+        // failure: the session stays Stopped and no transition is reported.
+        manager.stop(&session.session_id).unwrap();
+        assert!(manager.mark_exited(&session.session_id, false).is_none());
+        assert_eq!(
+            manager.status(&session.session_id).unwrap(),
+            AgentStatus::Stopped
+        );
+
+        // A second exit report for the same session, and one for an unknown
+        // session, are likewise ignored.
+        assert!(manager.mark_exited(&session.session_id, true).is_none());
+        assert!(manager.mark_exited("nope", true).is_none());
     }
 
     #[test]
